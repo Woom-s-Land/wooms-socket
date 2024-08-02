@@ -653,3 +653,5 @@ FodyWeavers.xsd
 
 # End of https://www.toptal.com/developers/gitignore/api/intellij,visualstudio,git,macos,windows,linux,java,gradle
 src/main/resources/application-auth.properties
+.idea
+build.gradle
