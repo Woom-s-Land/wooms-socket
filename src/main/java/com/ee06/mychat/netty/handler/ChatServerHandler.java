@@ -40,20 +40,13 @@ public class ChatServerHandler extends ChannelInboundHandlerAdapter {
         if (log.isDebugEnabled()) {
             log.debug(stringMessage);
         }
-//        log.info("msg1 : {}", msg);
-        if ( stringMessage.startsWith("join ")) {
-            ctx.fireChannelRead(msg);
+        if ( stringMessage.startsWith("pos> ")) {
+            User.current(ctx.channel()).posBroadcast(channelRepository, stringMessage.substring(5));
             return;
         }
-//        log.info("msg2 : {}", msg);
 
-        String[] splitMessage = stringMessage.split(" ");
-
-        if (splitMessage.length != 2) {
-            log.info("msg3 : {}", msg);
-            User.current(ctx.channel()).broadcast(channelRepository, msg);
-//            ctx.channel().writeAndFlush(stringMessage + "\n\r");
+        if( stringMessage.startsWith("chat> ") ){
+            User.current(ctx.channel()).chatBroadcast(channelRepository, stringMessage.substring(6));
         }
-
     }
 }

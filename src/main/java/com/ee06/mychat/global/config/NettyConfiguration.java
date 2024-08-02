@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.ee06.mychat.config;
+package com.ee06.mychat.global.config;
 
 
 import com.ee06.mychat.netty.ChannelRepository;

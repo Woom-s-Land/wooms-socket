@@ -25,13 +25,6 @@ import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
 
-
-/**
- * Main Server
- *
- * @author Jibeom Jung akka. Manty
- */
-
 @Slf4j
 @RequiredArgsConstructor
 @Component
@@ -45,7 +38,7 @@ public class TCPServer {
 
     public void start()  {
         try {
-            ChannelFuture serverChannelFuture = serverBootstrap.bind(tcpPort).sync();
+            ChannelFuture serverChannelFuture = serverBootstrap.bind(new InetSocketAddress("127.0.0.1" , tcpPort.getPort())).sync();
             log.info("Server is started : port {}", tcpPort.getPort());
             serverChannel = serverChannelFuture.channel().closeFuture().sync().channel();
         } catch (InterruptedException e) {
