@@ -77,7 +77,7 @@ public class JWTUtil {
             Jwts.parser().verifyWith(secretKey).build().parseSignedClaims(token);
             return true;
         }
-        catch (io.jsonwebtoken.security.SecurityException | MalformedJwtException | IllegalArgumentException _) {}
+        catch (io.jsonwebtoken.security.SecurityException | MalformedJwtException | IllegalArgumentException ignored) {}
         return false;
     }
 }
