@@ -43,8 +43,11 @@ class RoomAccessRevocationListenerTest {
             SocketSession target = f.hub.open(targetChannel, "cookie-not-logged");
             SocketSession otherUser = f.hub.open(otherUserChannel, "cookie-not-logged");
             SocketSession otherRoom = f.hub.open(otherRoomChannel, "cookie-not-logged");
-            otherRoom.identities.put(UUID.randomUUID().toString(), CompletableFuture.completedFuture(identity(UUID.randomUUID().toString(), MEMBER)));
+            otherRoom.authenticatedUserUuid = "55555555-5555-4555-8555-555555555555";
+            otherRoom.identities.put(UUID.randomUUID().toString(), CompletableFuture.completedFuture(identity(UUID.randomUUID().toString(), otherRoom.authenticatedUserUuid)));
+            target.authenticatedUserUuid = MEMBER;
             target.identities.put(ROOM, CompletableFuture.completedFuture(identity(ROOM, MEMBER)));
+            otherUser.authenticatedUserUuid = "44444444-4444-4444-8444-444444444444";
             otherUser.identities.put(ROOM, CompletableFuture.completedFuture(identity(ROOM, "44444444-4444-4444-8444-444444444444")));
             f.bus.subscribe(target, "target-sub", "/ws/wooms/chat/" + ROOM);
             f.bus.subscribe(otherUser, "other-sub", "/ws/wooms/chat/" + ROOM);
@@ -80,7 +83,8 @@ class RoomAccessRevocationListenerTest {
             await(() -> session.identities.containsKey(ROOM) && !session.identities.get(ROOM).isDone());
 
             f.listener.onMessage(new DefaultMessage(new byte[0], f.mapper.writeValueAsBytes(event())), null);
-            assertTrue(session.revokedRooms.contains(ROOM), "in-flight room was not marked revoked");
+            assertFalse(session.revokedRooms.contains(ROOM), "do not decide until trusted identity is known");
+            assertTrue(channel.isOpen());
             response.complete(identity(ROOM, MEMBER));
             awaitClosed(channel);
 

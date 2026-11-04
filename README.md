@@ -2,7 +2,7 @@
 
 기존 `develop`의 Netty 작업을 기반으로 WOOMS 실시간 기능을 별도 프로세스에서 실행한다.
 Spring Boot는 구성과 수명주기를 관리하며, 브라우저 연결은 Netty WebSocket이 직접 처리한다.
-기존 줄 단위 TCP 구현은 소스에 보존하지만 애플리케이션 스캔에서 제외했다.
+기존 줄 단위 TCP 구현은 제거했으며, 현재 실시간 연결은 Netty WebSocket으로 처리한다.
 
 패키지별 책임과 메시지·권한 철회 흐름은 [실시간 서버 구조 문서](docs/realtime-packages.md)에 정리했다.
 
@@ -63,6 +63,7 @@ STOMP 프레임 대신 JSON 이벤트를 사용한다. 기존 화면을 재사�
 - 토큰 만료 시 연결을 종료한다. 권한 cache 기본값은 60초이며, 수신 전용 연결을 포함한 재검증을 세션별 30–60초 간격으로 분산한다. 명령은 cache 만료 시 backend를 다시 확인한다. 재연결에는 유효한 로그인 쿠키가 필요하다.
 - 기존 `DELETE /api/wooms/{woomsId}/users`에서 실제 `ACCEPT → REFUSE` commit이 발생하면 backend가 버전 1 `ROOM_ACCESS_REVOKED` 이벤트를 발행한다. 해당 사용자/방에 매핑된 연결은 전체 WebSocket이 닫히며, 같은 WebSocket으로 이용 중인 다른 방도 함께 끊긴다. 연결을 닫으면 presence·mafia·구독 상태도 기존 cleanup 경로에서 정리된다.
 - Redis channel은 기본 `wooms.realtime.access.v1`이며 `WOOMS_REALTIME_ACCESS_CHANNEL`로 양쪽 서버에서 동일하게 설정한다. `WOOMS_REALTIME_ACCESS_EVENTS_ENABLED=false`로 listener/발행 relay를 끌 수 있지만 backend 재검증은 계속 동작한다. Pub/Sub 메시지는 유실·중복될 수 있고 durable outbox는 없다. Redis 장애·유실 시 권한 반영은 최대 재검증 간격과 backend 응답 시간만큼 늦을 수 있다. 401/403 등 확정 거부는 close code 4403, backend timeout/5xx 등 일시 장애는 1013으로 구분해 종료한다.
+- 권한 철회 이벤트가 인증 요청과 겹치면 검증 시도에 대상 UUID를 기록하고 backend가 돌려준 신뢰 사용자 UUID와 비교한다. 같은 방의 다른 사용자는 연결을 유지하고, UUID가 일치하는 세션만 종료한다.
 - private role/error/init은 해당 연결의 구독으로만 전달한다. 방 구독과 명령은 승인된 목적지만 허용한다.
 - 마피아 재참가 소유권은 사용자 UUID로 확인하며, 같은 닉네임의 다른 사용자가 기존 역할을 받을 수 없다.
 - 방별 실행 큐가 상태 변경·방송·비동기 저장 순서를 직렬화한다. 네트워크 I/O 이벤트 루프에서 DB나 HTTP 완료를 기다리지 않는다.
@@ -79,6 +80,7 @@ STOMP 프레임 대신 JSON 이벤트를 사용한다. 기존 화면을 재사�
 
 frontend 어댑터 테스트는 frontend 폴더의 `node --test tests/NettyClient.test.mjs`로 실행한다.
 실제 backend를 사용하는 통합 검증은 별도 메모리 DB와 독립 포트를 사용한다. 기존 `data/devdb`를 테스트 대상으로 사용하지 않는다.
+Redis 권한 철회는 실제 Redis, dev 프로필 backend(H2 메모리 DB), Netty를 실행한 뒤 `WOOMS_TEST_PASSWORD`를 설정하고 `python tools/redis-revocation-integration.py`로 검사한다. 이 검사는 두 사용자가 같은 방을 구독한 상태에서 한 사용자의 실제 탈퇴 뒤 대상 연결만 닫히고 다른 사용자는 계속 메시지를 주고받는지 확인한다.
 
 2026-11-02 검증 기록:
 
@@ -86,6 +88,7 @@ frontend 어댑터 테스트는 frontend 폴더의 `node --test tests/NettyClien
 - socket의 애플리케이션 실행, 마피아 UUID 소유권, 인증 만료·권한 재검증·연결 종료 경쟁, 서비스 자격 저장 테스트 통과.
 - frontend 어댑터 테스트 7개와 STOMP/Netty 두 모드 빌드 통과.
 - 실제 backend와 Netty를 별도 JVM으로 실행해 로그인 쿠키 기반 통합 검증 11개 항목 통과. 채팅·이동·그림판·갤러리·주기 저장·두 방 격리·미가입/익명/Origin 거부·3인 마피아 라운드·퇴장 정리를 확인했다.
+- 2026-11-04 Redis 권한 철회 재검증: 실제 CLOSE 제어 프레임 코드 4403 / reason `room access revoked`를 탈퇴 후 5초 내 확인했고, 같은 유효 쿠키의 신규 연결도 backend 권한 거부로 닫혔다. 다른 사용자 연결은 계속 채팅했다. 일반 예외나 transport 종료는 성공으로 처리하지 않는다.
 - 통합 검증 도구와 결과는 backend의 `tools/netty-smoke.py`, `tools/netty-smoke-result.json`에 있다. Python `websocket-client`와 `WOOMS_TEST_PASSWORD` 환경변수가 필요하며, 테스트용 seed 계정과 메모리 DB를 전제로 한다.
 - 독립 정적 리뷰 승인. 브라우저 화면 수동 QA, 운영 배포, 다중 인스턴스, 대규모 부하 비교는 수행하지 않았다.
 

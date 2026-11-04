@@ -8,6 +8,7 @@ import com.ee06.mychat.realtime.session.OutboundBus;
 import com.ee06.mychat.realtime.session.SocketSession;
 import com.ee06.mychat.realtime.sketch.SketchService;
 import com.ee06.mychat.realtime.mafia.engine.MafiaGameEngine;
+import com.ee06.mychat.realtime.access.event.RoomAccessRevoked;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.DefaultChannelId;
@@ -25,6 +26,9 @@ import static org.mockito.Mockito.*;
 
 class NativeHubAuthorizationTest {
     private static final String ROOM = UUID.randomUUID().toString();
+    private static final String USER_A = "11111111-1111-4111-8111-111111111111";
+    private static final String USER_B = "22222222-2222-4222-8222-222222222222";
+    private static final String OTHER_ROOM = "33333333-3333-4333-8333-333333333333";
 
     @Test void defaultsUseSixtySecondCacheAndThirtyToSixtySecondDistributedRevalidation() {
         SocketProperties properties = new SocketProperties();
@@ -42,6 +46,7 @@ class NativeHubAuthorizationTest {
             f.hub.handle(f.session, command("SUBSCRIBE", "id", "m", "destination", "/ws/wooms/move/" + ROOM));
             await(() -> f.session.subscriptions.containsKey("m"));
             assertEquals(expiresAt, f.session.expiryAt.get(ROOM));
+            assertEquals("u", f.session.authenticatedUserUuid);
             assertNotNull(f.session.authorizationTask);
             long delayMs = f.session.authorizationTask.getDelay(TimeUnit.MILLISECONDS);
             assertTrue(delayMs > 250 && delayMs <= 800, "revalidation delay outside configured spread: " + delayMs);
@@ -64,6 +69,124 @@ class NativeHubAuthorizationTest {
                 assertTrue(f.session.subscriptions.isEmpty());
             } finally { f.close(); }
         }
+    }
+
+    @Test void revocationDuringInitialAuthorizationClosesOnlyMatchingUserAfterIdentityArrives() throws Exception {
+        Fixture f = new Fixture();
+        EmbeddedChannel otherChannel = new EmbeddedChannel(DefaultChannelId.newInstance());
+        SocketSession otherSession = f.hub.open(otherChannel, "cookie-user-b");
+        try {
+            CompletableFuture<BackendBridge.Identity> responseA = new CompletableFuture<>();
+            CompletableFuture<BackendBridge.Identity> responseB = new CompletableFuture<>();
+            when(f.bridge.authorize(eq(ROOM), eq("cookie-is-test-only"))).thenReturn(responseA);
+            when(f.bridge.authorize(eq(ROOM), eq("cookie-user-b"))).thenReturn(responseB);
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "a", "destination", "/ws/wooms/move/" + ROOM));
+            f.hub.handle(otherSession, command("SUBSCRIBE", "id", "b", "destination", "/ws/wooms/move/" + ROOM));
+            verify(f.bridge, timeout(1000).times(2)).authorize(eq(ROOM), any());
+
+            RoomAccessRevoked event = eventFor(USER_B);
+            f.hub.onRoomAccessRevoked(event);
+            assertTrue(f.channel.isOpen(), "unknown identity must not cause a blanket close");
+            assertTrue(otherChannel.isOpen(), "wait for trusted identity before deciding the target session");
+
+            responseA.complete(new BackendBridge.Identity(ROOM, USER_A, "a", 1,
+                    System.currentTimeMillis() + 30_000));
+            await(() -> f.session.subscriptions.containsKey("a"));
+            assertTrue(f.channel.isOpen(), "a different user in the same room must remain connected");
+
+            responseB.complete(new BackendBridge.Identity(ROOM, USER_B, "b", 1,
+                    System.currentTimeMillis() + 30_000));
+            awaitClosed(otherChannel);
+            assertTrue(otherSession.subscriptions.isEmpty());
+            assertFalse(f.session.closed);
+        } finally {
+            f.hub.close(otherSession);
+            otherChannel.finishAndReleaseAll();
+            f.close();
+        }
+    }
+
+    @Test void revokeAtIdentityCompletionBoundaryIsComparedBeforeFuturePublishesIdentity() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            CompletableFuture<BackendBridge.Identity> response = new CompletableFuture<>();
+            when(f.bridge.authorize(eq(ROOM), any())).thenReturn(response);
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "sub", "destination", "/ws/wooms/move/" + ROOM));
+            verify(f.bridge, timeout(1000)).authorize(eq(ROOM), any());
+
+            java.util.concurrent.CountDownLatch completing = new java.util.concurrent.CountDownLatch(1);
+            Thread completionThread;
+            synchronized (f.session) {
+                completionThread = new Thread(() -> {
+                    completing.countDown();
+                    response.complete(new BackendBridge.Identity(ROOM, USER_A, "a", 1,
+                            System.currentTimeMillis() + 30_000));
+                });
+                completionThread.start();
+                assertTrue(completing.await(1, TimeUnit.SECONDS));
+                f.hub.onRoomAccessRevoked(eventFor(USER_B));
+            }
+            completionThread.join(1_000);
+            assertFalse(completionThread.isAlive());
+            await(() -> f.session.subscriptions.containsKey("sub"));
+            assertTrue(f.channel.isOpen());
+            assertFalse(f.session.revokedRooms.contains(ROOM));
+        } finally { f.close(); }
+    }
+
+    @Test void revocationForAnotherRoomKeepsTrustedUserSessionOpen() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            when(f.bridge.authorize(eq(ROOM), any())).thenReturn(CompletableFuture.completedFuture(
+                    new BackendBridge.Identity(ROOM, USER_A, "a", 1, System.currentTimeMillis() + 30_000)));
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "a", "destination", "/ws/wooms/chat/" + ROOM));
+            await(() -> f.session.subscriptions.containsKey("a"));
+
+            f.hub.onRoomAccessRevoked(eventFor(USER_A, OTHER_ROOM));
+
+            assertTrue(f.channel.isOpen(), "same principal in a different room must remain connected");
+            assertFalse(f.session.closed);
+            assertTrue(f.session.revokedRooms.isEmpty());
+        } finally { f.close(); }
+    }
+
+    @Test void revocationForAnotherRoomDoesNotMarkUnknownRoomAuthorization() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            CompletableFuture<BackendBridge.Identity> response = new CompletableFuture<>();
+            when(f.bridge.authorize(eq(OTHER_ROOM), any())).thenReturn(response);
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "other", "destination", "/ws/wooms/move/" + OTHER_ROOM));
+            verify(f.bridge, timeout(1000)).authorize(eq(OTHER_ROOM), any());
+
+            f.hub.onRoomAccessRevoked(eventFor(USER_A, ROOM));
+            response.complete(new BackendBridge.Identity(OTHER_ROOM, USER_A, "a", 1,
+                    System.currentTimeMillis() + 30_000));
+
+            await(() -> f.session.subscriptions.containsKey("other"));
+            assertTrue(f.channel.isOpen(), "unrelated pending room authorization must remain connected");
+            assertFalse(f.session.revokedRooms.contains(OTHER_ROOM));
+        } finally { f.close(); }
+    }
+
+    @Test void reauthorizationForAnotherRoomCannotChangeTrustedSessionUser() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            when(f.bridge.authorize(eq(ROOM), any())).thenReturn(CompletableFuture.completedFuture(
+                    new BackendBridge.Identity(ROOM, USER_A, "a", 1, System.currentTimeMillis() + 30_000)));
+            when(f.bridge.authorize(eq(OTHER_ROOM), any())).thenReturn(CompletableFuture.completedFuture(
+                    new BackendBridge.Identity(OTHER_ROOM, USER_B, "b", 1, System.currentTimeMillis() + 30_000)));
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "first", "destination", "/ws/wooms/chat/" + ROOM));
+            await(() -> f.session.subscriptions.containsKey("first"));
+            assertEquals(USER_A, f.session.authenticatedUserUuid);
+
+            f.hub.handle(f.session, "{\"op\":\"SEND\",\"destination\":\"/ws/send/chat/" + OTHER_ROOM
+                    + "\",\"body\":{\"content\":\"must-not-run\"}}");
+            awaitClosed(f.channel);
+
+            verify(f.presence, never()).send(any(), any(), anyString(), any());
+            assertTrue(f.session.revokedRooms.isEmpty());
+            assertEquals(4403, closeCode(f.channel));
+        } finally { f.close(); }
     }
 
     @Test void failedSecondAuthorizationBlocksSendAndClosesChannel() throws Exception {
@@ -155,6 +278,14 @@ class NativeHubAuthorizationTest {
         ObjectMapper mapper = new ObjectMapper(); var node = mapper.createObjectNode().put("op", op);
         for (int i=0;i<kv.length;i+=2) node.put(kv[i], kv[i+1]);
         return mapper.writeValueAsString(node);
+    }
+    private static RoomAccessRevoked eventFor(String userUuid) {
+        return new RoomAccessRevoked(1, UUID.randomUUID(), RoomAccessRevoked.TYPE,
+                UUID.fromString(ROOM), UUID.fromString(userUuid), "MEMBER_LEFT", java.time.Instant.now());
+    }
+    private static RoomAccessRevoked eventFor(String userUuid, String roomId) {
+        return new RoomAccessRevoked(1, UUID.randomUUID(), RoomAccessRevoked.TYPE,
+                UUID.fromString(roomId), UUID.fromString(userUuid), "MEMBER_LEFT", java.time.Instant.now());
     }
     private static void awaitClosed(EmbeddedChannel channel) throws Exception {
         awaitClosed(channel, 3);

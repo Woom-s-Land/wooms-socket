@@ -7,6 +7,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.Set;
+import java.util.HashSet;
 import io.netty.util.concurrent.ScheduledFuture;
 
 public final class SocketSession {
@@ -15,6 +16,9 @@ public final class SocketSession {
     public final String cookie;
     public final ConcurrentMap<String, String> subscriptions = new ConcurrentHashMap<>();
     public final ConcurrentMap<String, CompletableFuture<BackendBridge.Identity>> identities = new ConcurrentHashMap<>();
+    public final ConcurrentMap<String, AuthorizationAttempt> authorizationAttempts = new ConcurrentHashMap<>();
+    /** Trusted principal survives per-room cache replacement and revalidation. Guarded by this session's monitor. */
+    public String authenticatedUserUuid;
     public final ConcurrentMap<String, Long> lastValidatedAt = new ConcurrentHashMap<>();
     public final ConcurrentMap<String, Long> expiryAt = new ConcurrentHashMap<>();
     public final ConcurrentMap<String, ScheduledFuture<?>> expiryTasks = new ConcurrentHashMap<>();
@@ -29,6 +33,12 @@ public final class SocketSession {
         this.channel = channel;
         this.id = channel.id().asLongText();
         this.cookie = cookie;
+    }
+
+    public static final class AuthorizationAttempt {
+        public final CompletableFuture<BackendBridge.Identity> future = new CompletableFuture<>();
+        /** Mutated only while holding the owning SocketSession monitor. */
+        public final Set<String> revokedUserUuids = new HashSet<>();
     }
 
 }

@@ -228,38 +228,61 @@ public class NativeHub implements RoomAccessRevocationHandler {
             }
 
             // Publish the in-flight future before starting HTTP. A revocation arriving now can mark and close it.
-            CompletableFuture<BackendBridge.Identity> validation = new CompletableFuture<>();
+            SocketSession.AuthorizationAttempt attempt = new SocketSession.AuthorizationAttempt();
+            CompletableFuture<BackendBridge.Identity> validation = attempt.future;
             session.identities.put(roomId, validation);
+            session.authorizationAttempts.put(roomId, attempt);
             try {
                 bridge.authorize(roomId, session.cookie).whenComplete((identity, failure) -> {
                     if (failure != null) {
-                        terminateAuthorization(session, roomId, unwrap(failure));
-                        validation.completeExceptionally(unwrap(failure));
+                        synchronized (session) {
+                            session.authorizationAttempts.remove(roomId, attempt);
+                            terminateAuthorization(session, roomId, unwrap(failure));
+                            validation.completeExceptionally(unwrap(failure));
+                        }
                         return;
                     }
                     try {
                         synchronized (session) {
+                            if (session.authorizationAttempts.get(roomId) != attempt)
+                                throw new IllegalStateException("authorization attempt superseded");
                             if (session.closed || !session.channel.isActive())
                                 throw new IllegalStateException("session closed");
-                            if (session.revokedRooms.contains(roomId))
-                                throw new IllegalStateException("room access revoked during authorization");
                             if (identity == null || !roomId.equals(identity.roomId()))
                                 throw new IllegalStateException("backend returned mismatched room identity");
                             if (identity.expiresAt() <= System.currentTimeMillis())
                                 throw new IllegalStateException("backend identity is expired");
+                            if (session.authenticatedUserUuid != null
+                                    && !session.authenticatedUserUuid.equals(identity.userUuid()))
+                                throw new AuthorizationIdentityMismatchException();
+                            if (attempt.revokedUserUuids.contains(identity.userUuid())) {
+                                session.revokedRooms.add(roomId);
+                                throw new AuthorizationRevokedException();
+                            }
+                            if (session.authenticatedUserUuid == null)
+                                session.authenticatedUserUuid = identity.userUuid();
                             session.lastValidatedAt.put(roomId, System.currentTimeMillis());
                             scheduleExpiry(session, roomId, identity.expiresAt());
                             scheduleAuthorizationRevalidation(session);
+                            session.authorizationAttempts.remove(roomId, attempt);
+                            // Completion occurs under the same monitor as revocation inspection. Thus an
+                            // event cannot slip between UUID comparison and publication of trusted identity.
+                            validation.complete(identity);
                         }
-                        validation.complete(identity);
                     } catch (Throwable exception) {
-                        terminateAuthorization(session, roomId, exception);
-                        validation.completeExceptionally(exception);
+                        synchronized (session) {
+                            session.authorizationAttempts.remove(roomId, attempt);
+                            terminateAuthorization(session, roomId, exception);
+                            validation.completeExceptionally(exception);
+                        }
                     }
                 });
             } catch (Throwable exception) {
-                terminateAuthorization(session, roomId, exception);
-                validation.completeExceptionally(exception);
+                synchronized (session) {
+                    session.authorizationAttempts.remove(roomId, attempt);
+                    terminateAuthorization(session, roomId, exception);
+                    validation.completeExceptionally(exception);
+                }
             }
             validation.whenComplete((identity, failure) -> {
                 if (failure != null) terminateAuthorization(session, roomId, unwrap(failure));
@@ -271,24 +294,30 @@ public class NativeHub implements RoomAccessRevocationHandler {
     /** Called by the Redis adapter. In-flight room checks are closed conservatively. */
     public void onRoomAccessRevoked(RoomAccessRevoked event) {
         if (event == null || !event.isValid()) return;
+        String roomId = event.roomId().toString();
         for (SocketSession session : bus.sessionsSnapshot()) {
             boolean affected;
             synchronized (session) {
                 if (session.closed || !session.channel.isActive()) continue;
-                CompletableFuture<BackendBridge.Identity> identityFuture = session.identities.get(event.roomId().toString());
-                if (identityFuture == null) continue;
-                if (!identityFuture.isDone() || identityFuture.isCompletedExceptionally()) {
-                    affected = true;
+                // A user may keep one socket subscribed to several rooms. A room's
+                // revocation must only affect sessions that know or are checking that room.
+                if (!session.identities.containsKey(roomId)
+                        && !session.authorizationAttempts.containsKey(roomId)) continue;
+                String trustedUserUuid = session.authenticatedUserUuid;
+                if (trustedUserUuid != null) {
+                    affected = event.userUuid().toString().equals(trustedUserUuid);
                 } else {
-                    BackendBridge.Identity identity = identityFuture.getNow(null);
-                    affected = identity == null || event.userUuid().toString().equals(identity.userUuid());
+                    SocketSession.AuthorizationAttempt attempt = session.authorizationAttempts.get(roomId);
+                    if (attempt == null) continue;
+                    attempt.revokedUserUuids.add(event.userUuid().toString());
+                    continue;
                 }
                 if (affected) {
-                    session.revokedRooms.add(event.roomId().toString());
+                    session.revokedRooms.add(roomId);
                     session.closed = true;
                 }
             }
-            if (affected) terminateAuthorization(session, event.roomId().toString(), AuthorizationFailure.REVOKED);
+            if (affected) terminateAuthorization(session, roomId, AuthorizationFailure.REVOKED);
         }
     }
 
@@ -416,6 +445,14 @@ public class NativeHub implements RoomAccessRevocationHandler {
                 new AuthorizationFailure("authorization service unavailable", 1013, "authorization unavailable", true);
     }
 
+    private static final class AuthorizationRevokedException extends IllegalStateException {
+        private AuthorizationRevokedException() { super("room access revoked during authorization"); }
+    }
+
+    private static final class AuthorizationIdentityMismatchException extends IllegalStateException {
+        private AuthorizationIdentityMismatchException() { super("backend identity changed within a session"); }
+    }
+
     private CompletionStage<Void> writePong(SocketSession session) {
         if (!session.channel.isActive()) return CompletableFuture.completedFuture(null);
         session.channel.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(
@@ -449,6 +486,8 @@ public class NativeHub implements RoomAccessRevocationHandler {
             }
             session.expiryTasks.values().forEach(task -> task.cancel(false));
             session.expiryTasks.clear();
+            session.authorizationAttempts.clear();
+            session.authenticatedUserUuid = null;
         }
         session.tail.handle((ignored, failure) -> null).thenCompose(ignored -> {
             List<String> roomIds = new ArrayList<>(session.identities.keySet());

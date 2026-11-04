@@ -25,19 +25,12 @@ repositories {
 
 dependencies {
     implementation 'org.springframework:spring-web'
-    implementation 'jakarta.servlet:jakarta.servlet-api'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
-    implementation 'org.springframework.boot:spring-boot-starter-validation'
-    implementation 'org.springframework.boot:spring-boot-starter-security'
     implementation 'org.springframework.boot:spring-boot-starter-data-redis:3.3.0'
     implementation 'io.netty:netty-all:4.1.111.Final'
-    implementation 'io.jsonwebtoken:jjwt-api:0.12.3'
-    implementation 'io.jsonwebtoken:jjwt-gson:0.12.3'
 
     compileOnly 'org.projectlombok:lombok'
-
-    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.3'
 
     annotationProcessor 'org.projectlombok:lombok'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
