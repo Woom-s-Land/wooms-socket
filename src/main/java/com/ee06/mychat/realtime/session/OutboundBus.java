@@ -1,7 +1,9 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.session;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.Channel;
+import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -26,14 +28,19 @@ public class OutboundBus {
 
     public SocketSession get(String id) { return sessions.get(id); }
 
+    public java.util.List<SocketSession> sessionsSnapshot() { return java.util.List.copyOf(sessions.values()); }
+
     public void subscribe(SocketSession session, String id, String destination) {
-        String previous = session.subscriptions.put(id, destination);
-        if (previous != null) removeIndex(session, id, previous);
-        subscribers.compute(destination, (key, indexed) -> {
-            Set<Subscriber> set = indexed == null ? ConcurrentHashMap.newKeySet() : indexed;
-            set.add(new Subscriber(session.id, id));
-            return set;
-        });
+        synchronized (session) {
+            if (session.closed || !session.channel.isActive()) return;
+            String previous = session.subscriptions.put(id, destination);
+            if (previous != null) removeIndex(session, id, previous);
+            subscribers.compute(destination, (key, indexed) -> {
+                Set<Subscriber> set = indexed == null ? ConcurrentHashMap.newKeySet() : indexed;
+                set.add(new Subscriber(session.id, id));
+                return set;
+            });
+        }
     }
 
     public void unsubscribe(SocketSession session, String id) {
@@ -43,11 +50,13 @@ public class OutboundBus {
 
     public void close(SocketSession session) {
         if (session == null) return;
-        session.closed = true;
-        sessions.remove(session.id, session);
-        session.subscriptions.forEach((id, destination) -> removeIndex(session, id, destination));
-        session.subscriptions.clear();
-        session.identities.clear();
+        synchronized (session) {
+            session.closed = true;
+            sessions.remove(session.id, session);
+            session.subscriptions.forEach((id, destination) -> removeIndex(session, id, destination));
+            session.subscriptions.clear();
+            session.identities.clear();
+        }
     }
 
     public void publish(String destination, Object body) {
@@ -55,9 +64,8 @@ public class OutboundBus {
         if (targets == null) return;
         for (Subscriber target : targets) {
             SocketSession session = sessions.get(target.sessionId());
-            if (session != null && destination.equals(session.subscriptions.get(target.subscriptionId()))) {
-                deliver(session.channel, target.subscriptionId(), destination, body);
-            }
+            if (session != null && destination.equals(session.subscriptions.get(target.subscriptionId())))
+                deliver(session, target.subscriptionId(), destination, body);
         }
     }
 
@@ -67,7 +75,7 @@ public class OutboundBus {
         String normalized = destination.startsWith("/queue/") ? "/user" + destination : destination;
         session.subscriptions.forEach((subscriptionId, subscribedDestination) -> {
             if (normalized.equals(subscribedDestination) || destination.equals(subscribedDestination)) {
-                deliver(session.channel, subscriptionId, subscribedDestination, body);
+                deliver(session, subscriptionId, subscribedDestination, body);
             }
         });
     }
@@ -76,13 +84,47 @@ public class OutboundBus {
         write(channel, Map.of("op", "ERROR", "message", message));
     }
 
-    private void deliver(Channel channel, String subscriptionId, String destination, Object body) {
+    public void errorAndClose(Channel channel, String message, int closeCode, String closeReason) {
+        if (channel == null || !channel.isActive()) return;
+        if (!channel.isWritable()) {
+            channel.close();
+            return;
+        }
+        try {
+            String error = mapper.writeValueAsString(Map.of("op", "ERROR", "message", message));
+            channel.writeAndFlush(new TextWebSocketFrame(error)).addListener(sent -> {
+                if (!sent.isSuccess() || !channel.isActive()) {
+                    channel.close();
+                    return;
+                }
+                channel.writeAndFlush(new CloseWebSocketFrame(closeCode, closeReason))
+                        .addListener(ignored -> channel.close());
+            });
+        } catch (Exception exception) {
+            channel.close();
+        }
+    }
+
+    /**
+     * The session monitor is the write/revocation linearization point. A write already
+     * enqueued before closed is set may still reach the peer; no later write can pass.
+     */
+    private void deliver(SocketSession session, String subscriptionId, String destination, Object body) {
+        if (session.closed) return;
         try {
             String encodedBody = body instanceof String string ? string : mapper.writeValueAsString(body);
-            write(channel, Map.of("op", "MESSAGE", "subscription", subscriptionId,
-                    "destination", destination, "body", encodedBody));
+            // Never acquire a recipient's monitor while a publisher's monitor is held.
+            // The event-loop task rechecks admission immediately before enqueueing a frame.
+            session.channel.eventLoop().execute(() -> {
+                synchronized (session) {
+                    if (session.closed || !session.channel.isActive()
+                            || !destination.equals(session.subscriptions.get(subscriptionId))) return;
+                    write(session.channel, Map.of("op", "MESSAGE", "subscription", subscriptionId,
+                            "destination", destination, "body", encodedBody));
+                }
+            });
         } catch (Exception exception) {
-            error(channel, "message serialization failed");
+            error(session.channel, "message delivery failed");
         }
     }
 

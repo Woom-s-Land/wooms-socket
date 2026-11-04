@@ -1,5 +1,6 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.room;
 
+import com.ee06.mychat.realtime.config.SocketProperties;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutor;
 import jakarta.annotation.PreDestroy;

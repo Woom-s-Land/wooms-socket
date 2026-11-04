@@ -4,13 +4,17 @@
 Spring Boot는 구성과 수명주기를 관리하며, 브라우저 연결은 Netty WebSocket이 직접 처리한다.
 기존 줄 단위 TCP 구현은 소스에 보존하지만 애플리케이션 스캔에서 제외했다.
 
+패키지별 책임과 메시지·권한 철회 흐름은 [실시간 서버 구조 문서](docs/realtime-packages.md)에 정리했다.
+
+연결부터 메시지 처리와 종료까지의 [패키지별 요청 흐름 다이어그램](docs/request-flows.md)도 제공한다.
+
 로컬 작업 브랜치는 socket의 `feat/wooms-websocket-migration`, backend/frontend의 `feat/netty-transport-integration`이다.
 운영 배포와 대규모 성능 비교는 별도 작업이다.
 
 ## 실행
 
 Java 22가 필요하다. 먼저 `wooms-backend`의 `feat/netty-transport-integration` 작업본을 실행한다.
-Netty는 backend의 인증·그룹 권한·그림 저장 API를 사용한다. Redis나 JWT 공유 비밀을 새로 설정할 필요는 없다.
+Netty는 backend의 인증·그룹 권한·그림 저장 API와 Redis Pub/Sub 권한 철회 이벤트를 사용한다. JWT 공유 비밀은 두 서버 사이에 공유하지 않는다.
 두 서버 프로세스에 동일한 `WOOMS_REALTIME_INTERNAL_SECRET` 환경변수를 설정해야 한다.
 이 값은 32자 이상의 무작위 서버 전용 키이며, frontend의 `VITE_` 변수에 넣지 않는다.
 Netty는 미설정·너무 짧은 키로 시작하지 않고, backend 내부 저장 API도 미설정·틀린 키를 거부한다.
@@ -56,7 +60,9 @@ STOMP 프레임 대신 JSON 이벤트를 사용한다. 기존 화면을 재사�
 
 - WebSocket handshake의 `Authorization` 쿠키를 backend로 전달해 해당 방의 `ACCEPT` 가입 상태를 검증한다. 브라우저는 동일 호스트의 쿠키를 기본 전송한다. localhost와 127.0.0.1을 섞으면 쿠키가 전달되지 않을 수 있다.
 - room ID는 숫자 그룹 ID가 아닌 초대 코드 UUID다. 닉네임·의상·사용자 식별자는 backend가 반환한 DB 정보로 확정한다.
-- 토큰 만료 시 연결을 종료하고, 수신만 하는 연결도 5초 간격으로 방 권한을 다시 확인한다. 명령 처리의 권한 캐시도 최대 5초다. 가입 상태 변경의 전파에는 확인 주기와 backend 응답 시간만큼 지연이 있다. 재연결에는 유효한 로그인 쿠키가 필요하다.
+- 토큰 만료 시 연결을 종료한다. 권한 cache 기본값은 60초이며, 수신 전용 연결을 포함한 재검증을 세션별 30–60초 간격으로 분산한다. 명령은 cache 만료 시 backend를 다시 확인한다. 재연결에는 유효한 로그인 쿠키가 필요하다.
+- 기존 `DELETE /api/wooms/{woomsId}/users`에서 실제 `ACCEPT → REFUSE` commit이 발생하면 backend가 버전 1 `ROOM_ACCESS_REVOKED` 이벤트를 발행한다. 해당 사용자/방에 매핑된 연결은 전체 WebSocket이 닫히며, 같은 WebSocket으로 이용 중인 다른 방도 함께 끊긴다. 연결을 닫으면 presence·mafia·구독 상태도 기존 cleanup 경로에서 정리된다.
+- Redis channel은 기본 `wooms.realtime.access.v1`이며 `WOOMS_REALTIME_ACCESS_CHANNEL`로 양쪽 서버에서 동일하게 설정한다. `WOOMS_REALTIME_ACCESS_EVENTS_ENABLED=false`로 listener/발행 relay를 끌 수 있지만 backend 재검증은 계속 동작한다. Pub/Sub 메시지는 유실·중복될 수 있고 durable outbox는 없다. Redis 장애·유실 시 권한 반영은 최대 재검증 간격과 backend 응답 시간만큼 늦을 수 있다. 401/403 등 확정 거부는 close code 4403, backend timeout/5xx 등 일시 장애는 1013으로 구분해 종료한다.
 - private role/error/init은 해당 연결의 구독으로만 전달한다. 방 구독과 명령은 승인된 목적지만 허용한다.
 - 마피아 재참가 소유권은 사용자 UUID로 확인하며, 같은 닉네임의 다른 사용자가 기존 역할을 받을 수 없다.
 - 방별 실행 큐가 상태 변경·방송·비동기 저장 순서를 직렬화한다. 네트워크 I/O 이벤트 루프에서 DB나 HTTP 완료를 기다리지 않는다.

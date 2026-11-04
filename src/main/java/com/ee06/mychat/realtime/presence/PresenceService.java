@@ -1,5 +1,8 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.presence;
 
+import com.ee06.mychat.realtime.backend.BackendBridge;
+import com.ee06.mychat.realtime.session.OutboundBus;
+import com.ee06.mychat.realtime.session.SocketSession;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;

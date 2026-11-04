@@ -1,5 +1,6 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.backend;
 
+import com.ee06.mychat.realtime.config.SocketProperties;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 

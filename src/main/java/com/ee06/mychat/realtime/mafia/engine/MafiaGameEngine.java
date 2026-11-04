@@ -9,7 +9,7 @@ import com.ee06.mychat.realtime.mafia.common.MafiaTimings;
 import com.ee06.mychat.realtime.mafia.repository.MafiaGameRepository;
 import com.ee06.mychat.realtime.mafia.topic.TopicPair;
 import com.ee06.mychat.realtime.mafia.topic.TopicService;
-import com.ee06.mychat.realtime.RoomQueue;
+import com.ee06.mychat.realtime.room.RoomQueue;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;

@@ -1,5 +1,7 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.websocket;
 
+import com.ee06.mychat.realtime.config.SocketProperties;
+import com.ee06.mychat.realtime.session.SocketSession;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;

@@ -1,5 +1,9 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.sketch;
 
+import com.ee06.mychat.realtime.backend.BackendBridge;
+import com.ee06.mychat.realtime.room.RoomQueue;
+import com.ee06.mychat.realtime.session.OutboundBus;
+import com.ee06.mychat.realtime.session.SocketSession;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -48,8 +52,9 @@ public class SketchService {
     public CompletionStage<Void> send(SocketSession session, BackendBridge.Identity identity,
                                       String kind, JsonNode body) {
         return load(identity.roomId(), session.cookie).thenCompose(wall -> {
-            if ("sketch/draw".equals(kind)) return draw(identity, wall, body);
-            if ("sketch/save".equals(kind)) return archive(identity, session.cookie, wall);
+            if (session.closed || !session.channel.isActive()) return CompletableFuture.completedFuture(null);
+            if ("sketch/draw".equals(kind)) return draw(session, identity, wall, body);
+            if ("sketch/save".equals(kind)) return archive(session, identity, session.cookie, wall);
             bus.error(session.channel, "unsupported sketch operation");
             return CompletableFuture.completedFuture(null);
         });
@@ -73,7 +78,7 @@ public class SketchService {
         }
     }
 
-    private CompletionStage<Void> draw(BackendBridge.Identity identity, Wall wall, JsonNode body) {
+    private CompletionStage<Void> draw(SocketSession session, BackendBridge.Identity identity, Wall wall, JsonNode body) {
         String tool = text(body, "tool");
         Integer x = integer(body, "x"), y = integer(body, "y");
         Integer color = integer(body, "colorIndex");
@@ -81,9 +86,12 @@ public class SketchService {
                 && ("ERASE".equals(tool) || color != null && color >= 0 && color <= 11))) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("invalid sketch stroke"));
         }
-        synchronized (wall) {
-            wall.pixels[y][x] = "ERASE".equals(tool) ? EMPTY : color;
-            wall.dirty = true;
+        synchronized (session) {
+            if (session.closed || !session.channel.isActive()) return CompletableFuture.completedFuture(null);
+            synchronized (wall) {
+                wall.pixels[y][x] = "ERASE".equals(tool) ? EMPTY : color;
+                wall.dirty = true;
+            }
         }
         ObjectNode stroke = mapper.createObjectNode().put("tool", tool).put("x", x).put("y", y)
                 .put("nickname", identity.nickname());
@@ -92,10 +100,19 @@ public class SketchService {
         return CompletableFuture.completedFuture(null);
     }
 
-    private CompletionStage<Void> archive(BackendBridge.Identity identity, String cookie, Wall wall) {
-        int[][] pixels = snapshot(wall);
-        if (isBlank(pixels)) return CompletableFuture.failedFuture(new IllegalArgumentException("cannot archive an empty canvas"));
-        return bridge.archive(identity.roomId(), cookie, pixels).thenAccept(ignored -> {
+    private CompletionStage<Void> archive(SocketSession session, BackendBridge.Identity identity, String cookie, Wall wall) {
+        final int[][] pixels;
+        final CompletionStage<?> request;
+        synchronized (session) {
+            if (session.closed || !session.channel.isActive()) return CompletableFuture.completedFuture(null);
+            pixels = snapshot(wall);
+            if (isBlank(pixels)) return CompletableFuture.failedFuture(new IllegalArgumentException("cannot archive an empty canvas"));
+            // Initiate the request while holding the short session gate; never wait on it under the lock.
+            request = bridge.archive(identity.roomId(), cookie, pixels);
+        }
+        return request.thenAccept(ignored -> {
+            // The request was admitted before revocation. Finish a successful archive
+            // consistently even if its initiating connection has since been closed.
             synchronized (wall) { wall.pixels = blank(); wall.dirty = false; wall.cookie = cookie; }
             bus.publish("/ws/wooms/sketch/draw/" + identity.roomId(), Map.of("tool", "RESET"));
         });

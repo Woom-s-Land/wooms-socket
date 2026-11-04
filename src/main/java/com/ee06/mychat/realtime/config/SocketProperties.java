@@ -1,4 +1,4 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.config;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -20,4 +20,9 @@ public class SocketProperties {
     private int roomThreads = 4;
     private Duration backendTimeout = Duration.ofSeconds(5);
     private String storageSecret = "";
+    private boolean accessRevocationEnabled = true;
+    private String accessRevocationChannel = "wooms.realtime.access.v1";
+    private Duration authorizationCacheTtl = Duration.ofSeconds(60);
+    private Duration authorizationRevalidationMin = Duration.ofSeconds(30);
+    private Duration authorizationRevalidationMax = Duration.ofSeconds(60);
 }

@@ -1,5 +1,6 @@
-package com.ee06.mychat.realtime;
+package com.ee06.mychat.realtime.backend;
 
+import com.ee06.mychat.realtime.config.SocketProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;

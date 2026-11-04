@@ -4,7 +4,7 @@ import com.ee06.mychat.realtime.mafia.entity.MafiaGame;
 import com.ee06.mychat.realtime.mafia.entity.MafiaPlayer;
 import com.ee06.mychat.realtime.mafia.dto.outbound.*;
 import lombok.RequiredArgsConstructor;
-import com.ee06.mychat.realtime.OutboundBus;
+import com.ee06.mychat.realtime.session.OutboundBus;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;

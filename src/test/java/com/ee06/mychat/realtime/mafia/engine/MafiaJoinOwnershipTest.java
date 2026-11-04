@@ -1,6 +1,6 @@
 package com.ee06.mychat.realtime.mafia.engine;
 
-import com.ee06.mychat.realtime.RoomQueue;
+import com.ee06.mychat.realtime.room.RoomQueue;
 import com.ee06.mychat.realtime.mafia.common.MafiaTimings;
 import com.ee06.mychat.realtime.mafia.entity.MafiaPlayer;
 import com.ee06.mychat.realtime.mafia.repository.MafiaGameRepository;
