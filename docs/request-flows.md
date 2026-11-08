@@ -1,13 +1,11 @@
 # 패키지별 요청 흐름
 
-먼저 세 가지 주요 흐름을 왼쪽에서 오른쪽으로 읽는다. 아래 그림의 화살표는 처리 순서다.
-
-![연결, 일반 메시지, 권한 철회의 세 가지 요청 흐름](assets/request-flows-overview.png)
+연결, 메시지, 권한 철회 흐름을 아래 Mermaid 다이어그램으로 확인한다.
 
 권한 확인은 최초 접근·캐시 만료뿐 아니라 주기 재검증 때도 수행한다.
 이하 Mermaid 다이어그램은 저장·실패 처리까지 포함하는 상세 참조다.
 
-2026-11-03 작업본 기준. Mermaid를 지원하는 Markdown 뷰어와 GitHub에서 다이어그램을 볼 수 있다.
+2026-11-08 마피아 제외 작업본 기준. Mermaid를 지원하는 Markdown 뷰어와 GitHub에서 다이어그램을 볼 수 있다.
 각 노드의 패키지는 별도 표기가 없으면 `com.ee06.mychat.realtime` 하위다.
 화살표는 호출·데이터 흐름을 나타내며 같은 실행 스레드라는 뜻은 아니다.
 
@@ -25,7 +23,6 @@ flowchart TD
     Queue["room · RoomQueue<br/>방별 순서 제어"]
     Presence["presence · PresenceService<br/>채팅 · 캐릭터"]
     Sketch["sketch · SketchService<br/>공동 그림판"]
-    Mafia["mafia · MafiaGameEngine<br/>게임 규칙 · 타이머"]
     Bus["session · OutboundBus<br/>방송 · 개인 전달 · 쓰기 전 차단 확인"]
     Redis["Redis Pub/Sub"]
     Access["access.redis → access.port<br/>철회 이벤트 검사 · 처리 호출"]
@@ -40,11 +37,9 @@ flowchart TD
     Hub -->|"권한 확인 후"| Queue
     Queue --> Presence
     Queue --> Sketch
-    Queue --> Mafia
     Sketch --> Bridge
     Presence --> Bus
     Sketch --> Bus
-    Mafia --> Bus
     Bus -->|"각 연결 event loop에서 MESSAGE 전송"| Client
     Backend -->|"DB 커밋 후 권한 철회 발행"| Redis
     Redis --> Access -->|"ROOM_ACCESS_REVOKED"| Hub
@@ -52,7 +47,7 @@ flowchart TD
 ```
 
 `config`는 시작 시 설정을 공급한다. 일반 메시지마다 거치는 요청 처리 단계는 아니다.
-Redis는 권한 철회 전파에 사용하며 채팅·그림·게임 메시지의 전달 경로에는 들어가지 않는다.
+Redis는 권한 철회 전파에 사용하며 채팅·그림 메시지의 전달 경로에는 들어가지 않는다.
 
 ## 2. 연결과 최초 방 구독
 
@@ -104,7 +99,7 @@ sequenceDiagram
 초기 상태용 개인 큐는 방 구독보다 먼저 구독해야 초기 응답을 받을 수 있다.
 개인 큐 구독 자체가 방 데이터 접근을 승인하지는 않는다.
 
-## 3. 채팅·이동·게임 메시지
+## 3. 채팅·이동 메시지
 
 ```mermaid
 flowchart TD
@@ -118,16 +113,13 @@ flowchart TD
     Q --> Active{"세션이 여전히 활성인가?"}
     Active -->|"아니오"| Drop["명령 적용 중단"]
     Active -->|"예 · chat/move"| P["presence.PresenceService"]
-    Active -->|"예 · sketchmafia"| M["mafia.engine.MafiaGameEngine"]
     P --> Bus["session.OutboundBus"]
-    M --> Bus
     Bus --> Loop["수신 연결 event loop<br/>차단 상태 · 구독 재확인"]
     Loop --> Receivers["같은 방 구독자 또는 지정된 개인 연결"]
 ```
 
 유효한 캐시를 사용하는 이벤트는 backend를 매번 호출하지 않는다.
 동기 상태 변경과 권한 철회는 세션 monitor를 기준으로 순서를 정한다.
-게임 타이머도 방 큐를 통해 상태 전환을 처리한다. 개인 역할은 방 전체에 방송하지 않는다.
 
 ## 4. 그림 입력·주기 저장·갤러리 보관
 
@@ -202,7 +194,7 @@ sequenceDiagram
     participant A as Netty access.redis listener
     participant H as websocket.NativeHub / access.port handler
     participant S as session.SocketSession / OutboundBus
-    participant Q as room / presence / mafia
+    participant Q as room / presence
 
     C->>WS: 방 탈퇴 요청
     WS->>DB: ACCEPT → REFUSE
@@ -219,7 +211,7 @@ sequenceDiagram
         H->>S: 대상 세션 즉시 차단
         H->>S: event loop에서 종료 진행
         H->>Q: 기존 작업 뒤에 퇴장 정리 예약
-        Q->>Q: presence · mafia 참여 정리
+        Q->>Q: presence 연결 상태 정리
         Q->>S: 구독 · 세션 정리
     else 롤백
         DB-->>WS: 실패

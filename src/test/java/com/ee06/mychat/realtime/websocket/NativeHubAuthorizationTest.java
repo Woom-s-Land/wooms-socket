@@ -7,7 +7,6 @@ import com.ee06.mychat.realtime.room.RoomQueue;
 import com.ee06.mychat.realtime.session.OutboundBus;
 import com.ee06.mychat.realtime.session.SocketSession;
 import com.ee06.mychat.realtime.sketch.SketchService;
-import com.ee06.mychat.realtime.mafia.engine.MafiaGameEngine;
 import com.ee06.mychat.realtime.access.event.RoomAccessRevoked;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.channel.embedded.EmbeddedChannel;
@@ -274,6 +273,33 @@ class NativeHubAuthorizationTest {
         } finally { f.close(); }
     }
 
+    @Test void unsupportedGameDestinationsAreRejectedBeforeAuthorization() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            f.hub.handle(f.session, command("SUBSCRIBE", "id", "game-sub",
+                    "destination", "/ws/wooms/sketchmafia/state/" + ROOM));
+            f.hub.handle(f.session, command("SEND",
+                    "destination", "/ws/send/sketchmafia/join/" + ROOM, "body", "{}"));
+
+            f.channel.runPendingTasks();
+            int rejected = 0;
+            Object outbound;
+            while ((outbound = f.channel.readOutbound()) != null) {
+                if (outbound instanceof TextWebSocketFrame frame) {
+                    if (frame.text().contains("destination not allowed")) rejected++;
+                    frame.release();
+                } else if (outbound instanceof CloseWebSocketFrame frame) {
+                    frame.release();
+                }
+            }
+            assertEquals(2, rejected);
+            verifyNoInteractions(f.bridge);
+            assertTrue(f.session.subscriptions.isEmpty());
+        } finally {
+            f.close();
+        }
+    }
+
     private static String command(String op, String... kv) throws Exception {
         ObjectMapper mapper = new ObjectMapper(); var node = mapper.createObjectNode().put("op", op);
         for (int i=0;i<kv.length;i+=2) node.put(kv[i], kv[i+1]);
@@ -310,7 +336,7 @@ class NativeHubAuthorizationTest {
         final RoomQueue queue=new RoomQueue(properties);
         final EmbeddedChannel channel=new EmbeddedChannel(DefaultChannelId.newInstance());
         final OutboundBus bus=new OutboundBus();
-        final NativeHub hub=new NativeHub(bus,bridge,queue,presence,mock(SketchService.class),mock(MafiaGameEngine.class),properties);
+        final NativeHub hub=new NativeHub(bus,bridge,queue,presence,mock(SketchService.class),properties);
         final SocketSession session=hub.open(channel,"cookie-is-test-only");
         @Override public void close() { hub.close(session); channel.finishAndReleaseAll(); queue.shutdown(); }
     }

@@ -29,7 +29,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.time.Duration;
-import com.ee06.mychat.realtime.mafia.engine.MafiaGameEngine;
 import com.ee06.mychat.realtime.access.event.RoomAccessRevoked;
 import com.ee06.mychat.realtime.access.port.RoomAccessRevocationHandler;
 
@@ -39,30 +38,27 @@ public class NativeHub implements RoomAccessRevocationHandler {
     private static final int MAX_PENDING_COMMANDS = 256;
     private static final int MAX_SUBSCRIPTIONS = 32;
     private static final Pattern PUBLIC_DESTINATION = Pattern.compile(
-            "^/ws/wooms/(chat|move|disconnect|sketch/draw|sketchmafia/(?:state|reveal|result|chat))/([0-9a-fA-F-]{36})$");
+            "^/ws/wooms/(chat|move|disconnect|sketch/draw)/([0-9a-fA-F-]{36})$");
     private static final Pattern SEND_DESTINATION = Pattern.compile(
-            "^/ws/send/(chat|move|sketch/draw|sketch/save|sketchmafia/(?:join|start|submit|vote|chat|guess))/([0-9a-fA-F-]{36})$");
+            "^/ws/send/(chat|move|sketch/draw|sketch/save)/([0-9a-fA-F-]{36})$");
     private static final List<String> PRIVATE_DESTINATIONS = List.of(
-            "/user/queue/init", "/user/queue/sketch/init",
-            "/user/queue/sketchmafia/role", "/user/queue/sketchmafia/error");
+            "/user/queue/init", "/user/queue/sketch/init");
 
     private final OutboundBus bus;
     private final BackendBridge bridge;
     private final RoomQueue queue;
     private final PresenceService presence;
     private final SketchService sketch;
-    private final MafiaGameEngine mafia;
     private final SocketProperties properties;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
     public NativeHub(OutboundBus bus, BackendBridge bridge, RoomQueue queue, PresenceService presence,
-                     SketchService sketch, MafiaGameEngine mafia, SocketProperties properties) {
+                     SketchService sketch, SocketProperties properties) {
         this.bus = bus;
         this.bridge = bridge;
         this.queue = queue;
         this.presence = presence;
         this.sketch = sketch;
-        this.mafia = mafia;
         this.properties = properties;
         validateAuthorizationTiming(properties);
     }
@@ -166,7 +162,6 @@ public class NativeHub implements RoomAccessRevocationHandler {
                 return sketch.send(session, identity, kind, payload);
             synchronized (session) {
                 if (session.closed || !session.channel.isActive()) return CompletableFuture.completedFuture(null);
-                if (kind.startsWith("sketchmafia/")) return mafiaCommand(session, identity, roomId, kind, payload);
                 if ("chat".equals(kind) || "move".equals(kind)) {
                     presence.send(session, identity, kind, payload);
                     return CompletableFuture.completedFuture(null);
@@ -174,24 +169,6 @@ public class NativeHub implements RoomAccessRevocationHandler {
             }
             return CompletableFuture.failedFuture(new IllegalArgumentException("unsupported event"));
         }));
-    }
-
-    private CompletionStage<Void> mafiaCommand(SocketSession s, BackendBridge.Identity i, String room,
-                                               String kind, JsonNode body) {
-        switch (kind) {
-            case "sketchmafia/join" -> {
-                String existing = mafia.roomOf(s.id);
-                if (existing != null && !existing.equals(room)) return CompletableFuture.failedFuture(new IllegalStateException("session already joined another mafia room"));
-                mafia.join(room, s.id, i.userUuid(), i.nickname(), i.costume());
-            }
-            case "sketchmafia/start" -> mafia.start(room, s.id, body.has("drawSeconds") && !body.get("drawSeconds").isNull() ? body.get("drawSeconds").asInt() : null);
-            case "sketchmafia/submit" -> mafia.submit(room, s.id, mapper.convertValue(body.get("pixels"), int[][].class));
-            case "sketchmafia/vote" -> mafia.vote(room, s.id, body.path("target").asText());
-            case "sketchmafia/chat" -> mafia.chat(room, s.id, body.path("message").asText());
-            case "sketchmafia/guess" -> mafia.guess(room, s.id, body.path("word").asText());
-            default -> { return CompletableFuture.failedFuture(new IllegalArgumentException("unsupported mafia operation")); }
-        }
-        return CompletableFuture.completedFuture(null);
     }
 
     private CompletionStage<BackendBridge.Identity> authorize(SocketSession session, String roomId) {
@@ -482,13 +459,10 @@ public class NativeHub implements RoomAccessRevocationHandler {
         }
         session.tail.handle((ignored, failure) -> null).thenCompose(ignored -> {
             List<String> roomIds = new ArrayList<>(session.identities.keySet());
-            String mafiaRoom = mafia.roomOf(session.id);
             CompletableFuture<?>[] cleanup = roomIds.stream()
                     .map(roomId -> queue.sync(roomId, () -> presence.onDisconnect(session, roomId)))
                     .toArray(CompletableFuture[]::new);
-            CompletableFuture<Void> all = CompletableFuture.allOf(cleanup);
-            if (mafiaRoom == null) return all;
-            return all.thenCompose(ignored2 -> queue.sync(mafiaRoom, () -> mafia.disconnect(session.id)));
+            return CompletableFuture.allOf(cleanup);
         }).whenComplete((ignored, failure) -> {
             bus.close(session);
         });

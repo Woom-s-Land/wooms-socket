@@ -1,6 +1,6 @@
 # 실시간 서버 패키지와 처리 흐름
 
-2026-11-03 작업본 기준. 기본 패키지는 `com.ee06.mychat.realtime`이다.
+2026-11-08 마피아 제외 작업본 기준. 기본 패키지는 `com.ee06.mychat.realtime`이다.
 Spring Boot는 설정과 수명주기를 관리하고 Netty가 WebSocket 연결을 처리한다.
 이 문서는 현재 구현의 책임과 경계를 설명하며 운영 성능 보장을 의미하지 않는다.
 
@@ -17,7 +17,6 @@ realtime/
 ├─ room/       방별 작업 순서 제어
 ├─ presence/   채팅과 캐릭터 상태
 ├─ sketch/     공동 그림판
-├─ mafia/      그림 마피아
 └─ access/     권한 철회 이벤트
 ```
 
@@ -30,22 +29,7 @@ realtime/
 | `room` | `RoomQueue` | 같은 방의 명령을 순서대로 실행하고 반환된 비동기 작업 완료까지 순서 유지. 고정 스레드를 여러 방이 공유하며 방별 대기 작업 수 제한 |
 | `presence` | `PresenceService` | 서버에서 확정한 닉네임으로 채팅 방송, 캐릭터 위치·방향·의상·연결 소유권 관리, 입장 초기 상태와 퇴장 방송 |
 | `sketch` | `SketchService` | 32×32 그림 상태, 펜·지우개 검증과 동기화, 입장 스냅샷, 변경분 주기 저장, 갤러리 보관 성공 후 초기화 |
-| `mafia` | `MafiaGameEngine` 등 | 참가·역할·그림 제출·공개·토론·투표·추측·결과, 단계별 시간과 게임 상태 관리 |
 | `access` | `RoomAccessRevoked`, `RoomAccessRevocationHandler`, Redis 구현 | backend의 권한 철회 이벤트를 받아 해당 연결의 송수신 차단 및 종료 처리로 연결 |
-
-## 마피아 하위 패키지
-
-| 패키지 | 책임 |
-|---|---|
-| `mafia.entity` | 게임, 플레이어, 역할, 단계, 결과 모델 |
-| `mafia.engine` | 게임 규칙, 단계 전환, 게임 방송과 개인 역할 전달 |
-| `mafia.repository` | 프로세스 메모리의 게임 상태 보관 |
-| `mafia.dto.outbound` | 게임 상태·역할·공개 그림·채팅·결과·오류 형식 |
-| `mafia.topic` | 제시어 데이터와 선택 처리 |
-| `mafia.common` | 단계별 제한 시간과 스케줄러 설정 |
-
-마피아 재참가 소유권은 닉네임이 아닌 사용자 UUID로 확인한다.
-개인 역할은 방 전체 방송과 분리해 해당 연결에 전달한다.
 
 ## 권한 철회 하위 패키지
 
@@ -64,7 +48,7 @@ backend의 대응 코드는 `com.ee06.wooms.domain.realtime.access`에 있다.
 1. `RealtimeServer`가 연결을 수락하고 `NativeHub`가 세션을 연다. `CONNECTED`는 방 접근 인증 성공을 의미하지 않는다.
 2. `NativeHub`가 `SUBSCRIBE` 또는 `SEND`의 목적지와 본문을 검사한다.
 3. 최초 방 접근이면 `BackendBridge`를 통해 로그인과 현재 가입 권한을 확인한다. 이후 유효한 세션 캐시를 사용한다.
-4. 방 작업은 `RoomQueue`에서 순서대로 실행하고 `PresenceService`, `SketchService`, `MafiaGameEngine`으로 전달한다.
+4. 방 작업은 `RoomQueue`에서 순서대로 실행하고 `PresenceService`, `SketchService`으로 전달한다.
 5. `OutboundBus`가 구독자를 찾아 각 연결의 event loop에서 차단·구독 상태를 확인한 뒤 메시지를 쓴다.
 
 backend는 인증·가입 정보와 DB 영속 데이터의 소유자다. Netty는 실시간 연결과 메모리 상태를 담당한다.
@@ -76,7 +60,7 @@ HTTP 요청은 비동기지만 반환된 작업을 방 큐가 기다리므로 �
 2. DB 커밋 성공 후 비동기 Redis 발행을 요청한다. 롤백 시 외부 이벤트는 발행하지 않는다.
 3. Netty Redis 리스너가 이벤트를 검사하고 `RoomAccessRevocationHandler`를 호출한다.
 4. `NativeHub`는 이미 검증된 사용자 UUID 또는 in-flight 검증이 완료해 신뢰된 UUID가 이벤트 대상과 일치할 때만 해당 세션을 차단한다. 같은 방에서 다른 사용자의 인증이 진행 중이면 응답 UUID를 확인할 때까지 연결을 유지한다.
-5. 기존 종료 경로가 구독·캐릭터·마피아 참여 상태를 정리한다. 수신만 하던 연결도 대상이다.
+5. 기존 종료 경로가 구독·캐릭터 상태를 정리한다. 수신만 하던 연결도 대상이다.
 
 현재 정책은 방 구독 하나만 해제하는 대신 해당 WebSocket 전체를 종료한다.
 같은 연결로 이용 중인 다른 방도 영향을 받으며 재접속 시 backend 검증을 다시 거친다.
@@ -94,7 +78,7 @@ HTTP 요청은 비동기지만 반환된 작업을 방 큐가 기다리므로 �
 
 ## 경계와 검증 범위
 
-- STOMP와 Netty에서 같은 방을 동시에 운영하거나 여러 Netty 인스턴스가 게임·그림 상태를 공유하는 기능은 없다. Redis 권한 이벤트 방송이 도메인 상태 공유를 제공하지는 않는다.
-- 채팅 이력 재생과 서버 재시작 후 메모리 게임 상태 복구는 지원하지 않는다.
+- STOMP와 Netty에서 같은 방을 동시에 운영하거나 여러 Netty 인스턴스가 그림 상태를 공유하는 기능은 없다. Redis 권한 이벤트 방송이 도메인 상태 공유를 제공하지는 않는다.
+- 채팅 이력 재생과 서버 재시작 후 캐릭터 위치 등 휘발성 상태 복구는 지원하지 않는다.
 - 방 큐·그림 캐시의 미사용 상태 정리와 구독 해제의 방 퇴장 의미 정리는 후속 개선 대상이다.
-- socket 전체 테스트 25개 통과. 2026-11-04 실제 Redis 통합에서 close code 4403 / reason `room access revoked` 및 신규 연결 권한 거부를 확인했다. 브라우저 화면 QA는 미완료다.
+- 이전 버전의 테스트 통과 기록은 현재 커밋의 재검증 결과를 의미하지 않는다. 2026-11-04 실제 Redis 통합에서 close code 4403 / reason `room access revoked` 및 신규 연결 권한 거부를 확인했다. 브라우저 화면 QA는 미완료다.
