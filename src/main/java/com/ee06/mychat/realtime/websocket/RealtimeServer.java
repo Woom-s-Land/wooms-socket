@@ -4,7 +4,6 @@ import com.ee06.mychat.realtime.config.SocketProperties;
 import com.ee06.mychat.realtime.session.SocketSession;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
@@ -27,7 +26,6 @@ import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrameAggregator;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
-import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
 import io.netty.handler.timeout.IdleStateHandler;
@@ -50,15 +48,16 @@ import java.util.concurrent.TimeUnit;
 @EnableConfigurationProperties(SocketProperties.class)
 public class RealtimeServer implements SmartLifecycle {
     private static final AttributeKey<String> COOKIE = AttributeKey.valueOf("requestCookie");
-    private static final long WRITE_LOW_WATER_MARK = 64 * 1024L;
-    private static final long WRITE_HIGH_WATER_MARK = 256 * 1024L;
+    private static final int WRITE_LOW_WATER_MARK = 64 * 1024;
+    private static final int WRITE_HIGH_WATER_MARK = 256 * 1024;
 
     private final SocketProperties properties;
     private final NativeHub hub;
     private final ChannelGroup children = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
-    private volatile EventLoopGroup boss;
-    private volatile EventLoopGroup workers;
-    private volatile Channel serverChannel;
+    // Lifecycle fields change only inside synchronized start/stop; running is also read by isRunning().
+    private EventLoopGroup boss;
+    private EventLoopGroup workers;
+    private Channel serverChannel;
     private volatile boolean running;
 
     @Override
@@ -76,7 +75,7 @@ public class RealtimeServer implements SmartLifecycle {
                     .option(ChannelOption.SO_BACKLOG, 128)
                     .childOption(ChannelOption.TCP_NODELAY, true)
                     .childOption(ChannelOption.WRITE_BUFFER_WATER_MARK,
-                            new WriteBufferWaterMark((int) WRITE_LOW_WATER_MARK, (int) WRITE_HIGH_WATER_MARK))
+                            new WriteBufferWaterMark(WRITE_LOW_WATER_MARK, WRITE_HIGH_WATER_MARK))
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel channel) {
@@ -92,16 +91,13 @@ public class RealtimeServer implements SmartLifecycle {
                             pipeline.addLast("frameHandler", new FrameHandler(hub));
                         }
                     });
-            ChannelFuture bound = bootstrap.bind(properties.getHost(), properties.getPort()).syncUninterruptibly();
-            if (!bound.isSuccess()) {
-                throw new IllegalStateException("Could not bind realtime server", bound.cause());
-            }
-            serverChannel = bound.channel();
+            serverChannel = bootstrap.bind(properties.getHost(), properties.getPort()).syncUninterruptibly().channel();
             running = true;
             log.info("Realtime WebSocket server listening on {}:{}{}", properties.getHost(), properties.getPort(), properties.getPath());
-        } catch (RuntimeException exception) {
+        } catch (Throwable failure) {
+            // syncUninterruptibly() rethrows checked BindException unchecked, so RuntimeException is not enough.
             shutdownGroups();
-            throw exception;
+            throw failure;
         }
     }
 
@@ -125,9 +121,6 @@ public class RealtimeServer implements SmartLifecycle {
     }
 
     @Override public boolean isRunning() { return running; }
-    @Override public int getPhase() { return Integer.MAX_VALUE; }
-    @Override public boolean isAutoStartup() { return true; }
-    @Override public void stop(Runnable callback) { stop(); callback.run(); }
 
     private static final class OriginGate extends ChannelInboundHandlerAdapter {
         private final SocketProperties properties;
@@ -177,13 +170,8 @@ public class RealtimeServer implements SmartLifecycle {
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, WebSocketFrame message) {
-            if (message instanceof TextWebSocketFrame text) {
-                hub.handle(session, text.text());
-            } else if (message instanceof BinaryWebSocketFrame) {
-                ctx.close();
-            } else {
-                ctx.close();
-            }
+            if (message instanceof TextWebSocketFrame text) hub.handle(session, text.text());
+            else ctx.close();
         }
 
         @Override

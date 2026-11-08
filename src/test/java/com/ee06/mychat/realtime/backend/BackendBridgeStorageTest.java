@@ -37,7 +37,7 @@ class BackendBridgeStorageTest {
             BackendBridge bridge = new BackendBridge(properties);
 
             assertTrue(bridge.putWall("00000000-0000-0000-0000-000000000001",
-                    "Authorization=expired-user-cookie", blankGrid()).join().isObject());
+                    blankGrid()).join().isObject());
             assertEquals("/api/auth/realtime/rooms/00000000-0000-0000-0000-000000000001/wall", path.get());
             assertEquals(SECRET, serviceKey.get());
             assertNull(cookie.get());
@@ -65,7 +65,7 @@ class BackendBridgeStorageTest {
 
             CompletionException failure = assertThrows(CompletionException.class,
                     () -> bridge.putWall("00000000-0000-0000-0000-000000000001",
-                            "Authorization=expired-user-cookie", blankGrid()).join());
+                            blankGrid()).join());
             assertEquals("Internal wall storage key is not configured", failure.getCause().getMessage());
             assertFalse(received.get());
         } finally {

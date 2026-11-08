@@ -6,6 +6,7 @@ import io.netty.channel.Channel;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Set;
 import java.util.HashSet;
 import io.netty.util.concurrent.ScheduledFuture;
@@ -25,6 +26,8 @@ public final class SocketSession {
     public final Set<String> revokedRooms = ConcurrentHashMap.newKeySet();
     public volatile ScheduledFuture<?> authorizationTask;
     public volatile CompletableFuture<Void> tail = CompletableFuture.completedFuture(null);
+    /** Inbound commands chained on tail but not yet finished; bounds per-connection backlog. */
+    public final AtomicInteger pendingCommands = new AtomicInteger();
     public volatile boolean closed;
     public volatile boolean terminationStarted;
     public volatile boolean closeStarted;

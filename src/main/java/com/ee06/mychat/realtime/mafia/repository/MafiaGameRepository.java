@@ -9,9 +9,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Holds the live {@link MafiaGame} per room (in memory only). Mirrors
- * {@code ChannelRepository}/{@code SketchSessionRepository}. Also keeps a
- * reverse sessionId -> roomId index so disconnect handling can find the game.
+ * Holds the live {@link MafiaGame} per room (in memory only) and the single
+ * sessionId -> roomId index of successful joins, used for the one-room rule and disconnect.
  */
 @Component
 @RequiredArgsConstructor

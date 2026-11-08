@@ -10,21 +10,22 @@ import com.ee06.mychat.realtime.room.RoomQueue;
 import com.ee06.mychat.realtime.presence.PresenceService;
 import com.ee06.mychat.realtime.sketch.SketchService;
 import io.netty.channel.Channel;
+import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.util.concurrent.ScheduledFuture;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.time.Duration;
@@ -37,7 +38,6 @@ import com.ee06.mychat.realtime.access.port.RoomAccessRevocationHandler;
 public class NativeHub implements RoomAccessRevocationHandler {
     private static final int MAX_PENDING_COMMANDS = 256;
     private static final int MAX_SUBSCRIPTIONS = 32;
-    private static final int MAX_FRAME_BYTES = 65_536;
     private static final Pattern PUBLIC_DESTINATION = Pattern.compile(
             "^/ws/wooms/(chat|move|disconnect|sketch/draw|sketchmafia/(?:state|reveal|result|chat))/([0-9a-fA-F-]{36})$");
     private static final Pattern SEND_DESTINATION = Pattern.compile(
@@ -54,8 +54,6 @@ public class NativeHub implements RoomAccessRevocationHandler {
     private final MafiaGameEngine mafia;
     private final SocketProperties properties;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-    private final Map<String, AtomicInteger> pending = new ConcurrentHashMap<>();
-    private final Map<String, String> mafiaRooms = new ConcurrentHashMap<>();
 
     public NativeHub(OutboundBus bus, BackendBridge bridge, RoomQueue queue, PresenceService presence,
                      SketchService sketch, MafiaGameEngine mafia, SocketProperties properties) {
@@ -70,14 +68,12 @@ public class NativeHub implements RoomAccessRevocationHandler {
     }
 
     public SocketSession open(Channel channel, String cookie) {
-        SocketSession session = bus.open(channel, cookie);
-        pending.put(session.id, new AtomicInteger());
-        return session;
+        return bus.open(channel, cookie);
     }
 
     public void handle(SocketSession session, String text) {
         if (session == null || session.closed || !session.channel.isActive()) return;
-        AtomicInteger count = pending.computeIfAbsent(session.id, ignored -> new AtomicInteger());
+        AtomicInteger count = session.pendingCommands;
         if (count.incrementAndGet() > MAX_PENDING_COMMANDS) {
             count.decrementAndGet();
             session.channel.close();
@@ -97,9 +93,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
 
     private CompletionStage<Void> dispatch(SocketSession session, String text) {
         try {
-            if (text == null || text.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > MAX_FRAME_BYTES) {
-                return failed(session, "frame too large");
-            }
+            // Frame size is enforced by the WebSocket pipeline (SocketProperties.maxFrameBytes).
             JsonNode command = mapper.readTree(text);
             if (command == null || !command.isObject() || !command.path("op").isTextual()) {
                 return failed(session, "invalid command");
@@ -186,7 +180,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
                                                String kind, JsonNode body) {
         switch (kind) {
             case "sketchmafia/join" -> {
-                String existing = mafiaRooms.putIfAbsent(s.id, room);
+                String existing = mafia.roomOf(s.id);
                 if (existing != null && !existing.equals(room)) return CompletableFuture.failedFuture(new IllegalStateException("session already joined another mafia room"));
                 mafia.join(room, s.id, i.userUuid(), i.nickname(), i.costume());
             }
@@ -284,9 +278,6 @@ public class NativeHub implements RoomAccessRevocationHandler {
                     validation.completeExceptionally(exception);
                 }
             }
-            validation.whenComplete((identity, failure) -> {
-                if (failure != null) terminateAuthorization(session, roomId, unwrap(failure));
-            });
             return validation;
         }
     }
@@ -324,16 +315,16 @@ public class NativeHub implements RoomAccessRevocationHandler {
     private void scheduleExpiry(SocketSession session, String roomId, long expiresAt) {
         Long existing = session.expiryAt.get(roomId);
         if (existing != null && existing == expiresAt && session.expiryTasks.containsKey(roomId)) return;
-        io.netty.util.concurrent.ScheduledFuture<?> previous = session.expiryTasks.remove(roomId);
+        ScheduledFuture<?> previous = session.expiryTasks.remove(roomId);
         if (previous != null) previous.cancel(false);
         session.expiryAt.put(roomId, expiresAt);
         long delay = Math.max(0, expiresAt - System.currentTimeMillis());
-        io.netty.util.concurrent.ScheduledFuture<?> task = session.channel.eventLoop().schedule(() -> {
+        ScheduledFuture<?> task = session.channel.eventLoop().schedule(() -> {
             if (session.closed) return;
             bus.error(session.channel, "access token expired");
             close(session);
             session.channel.close();
-        }, delay, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }, delay, TimeUnit.MILLISECONDS);
         session.expiryTasks.put(roomId, task);
     }
 
@@ -355,7 +346,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
                     }
                     authorize(session, roomId);
                 }
-            }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, delayMs, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -408,7 +399,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
 
     private static AuthorizationFailure classifyAuthorizationFailure(Throwable failure) {
         int status = backendStatus(failure);
-        if (status == 401 || status == 403 || (status >= 400 && status < 500 && status != 408 && status != 429))
+        if (status >= 400 && status < 500 && status != 408 && status != 429)
             return AuthorizationFailure.DENIED;
         if (failure instanceof IllegalStateException) return AuthorizationFailure.DENIED;
         return AuthorizationFailure.TEMPORARY;
@@ -455,7 +446,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
 
     private CompletionStage<Void> writePong(SocketSession session) {
         if (!session.channel.isActive()) return CompletableFuture.completedFuture(null);
-        session.channel.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(
+        session.channel.writeAndFlush(new TextWebSocketFrame(
                 "{\"op\":\"PONG\"}"));
         return CompletableFuture.completedFuture(null);
     }
@@ -491,7 +482,7 @@ public class NativeHub implements RoomAccessRevocationHandler {
         }
         session.tail.handle((ignored, failure) -> null).thenCompose(ignored -> {
             List<String> roomIds = new ArrayList<>(session.identities.keySet());
-            String mafiaRoom = mafiaRooms.remove(session.id);
+            String mafiaRoom = mafia.roomOf(session.id);
             CompletableFuture<?>[] cleanup = roomIds.stream()
                     .map(roomId -> queue.sync(roomId, () -> presence.onDisconnect(session, roomId)))
                     .toArray(CompletableFuture[]::new);
@@ -500,7 +491,6 @@ public class NativeHub implements RoomAccessRevocationHandler {
             return all.thenCompose(ignored2 -> queue.sync(mafiaRoom, () -> mafia.disconnect(session.id)));
         }).whenComplete((ignored, failure) -> {
             bus.close(session);
-            pending.remove(session.id);
         });
     }
 }

@@ -41,11 +41,8 @@ public class BackendBridge {
         return request("GET", roomPath(roomId) + "/wall", cookie, null);
     }
 
-    public CompletableFuture<JsonNode> putWall(String roomId, String cookie, int[][] pixels) {
-        return internalRequest(roomId, pixels);
-    }
-
-    private CompletableFuture<JsonNode> internalRequest(String roomId, int[][] pixels) {
+    /** Saves the shared wall with the service key; user cookies are never forwarded here. */
+    public CompletableFuture<JsonNode> putWall(String roomId, int[][] pixels) {
         try {
             String secret = properties.getStorageSecret();
             if (secret == null || secret.length() < 32) return CompletableFuture.failedFuture(new IllegalStateException("Internal wall storage key is not configured"));

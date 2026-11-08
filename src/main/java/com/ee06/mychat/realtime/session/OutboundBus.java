@@ -7,6 +7,7 @@ import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,7 +29,7 @@ public class OutboundBus {
 
     public SocketSession get(String id) { return sessions.get(id); }
 
-    public java.util.List<SocketSession> sessionsSnapshot() { return java.util.List.copyOf(sessions.values()); }
+    public List<SocketSession> sessionsSnapshot() { return List.copyOf(sessions.values()); }
 
     public void subscribe(SocketSession session, String id, String destination) {
         synchronized (session) {
@@ -135,7 +136,7 @@ public class OutboundBus {
             return;
         }
         try {
-            channel.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(mapper.writeValueAsString(envelope)))
+            channel.writeAndFlush(new TextWebSocketFrame(mapper.writeValueAsString(envelope)))
                     .addListener(future -> { if (!future.isSuccess()) channel.close(); });
         } catch (Exception exception) {
             channel.close();

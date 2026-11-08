@@ -40,7 +40,6 @@ realtime/
 | `mafia.entity` | 게임, 플레이어, 역할, 단계, 결과 모델 |
 | `mafia.engine` | 게임 규칙, 단계 전환, 게임 방송과 개인 역할 전달 |
 | `mafia.repository` | 프로세스 메모리의 게임 상태 보관 |
-| `mafia.dto.inbound` | 참가·시작·제출·투표·채팅·추측 요청 형식 |
 | `mafia.dto.outbound` | 게임 상태·역할·공개 그림·채팅·결과·오류 형식 |
 | `mafia.topic` | 제시어 데이터와 선택 처리 |
 | `mafia.common` | 단계별 제한 시간과 스케줄러 설정 |

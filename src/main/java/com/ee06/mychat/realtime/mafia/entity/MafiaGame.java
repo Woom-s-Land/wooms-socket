@@ -10,12 +10,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * In-memory state for one room's Drawing-Mafia game (volatile, no DB).
- * ALL access goes through {@link #lock}; the engine holds it for every
- * transition, timer callback and disconnect so state stays consistent.
+ * Not thread-safe: every command, timer callback and disconnect runs on the
+ * room's {@code RoomQueue}, which serializes all access to one game.
  */
 @Getter
 @Setter
@@ -26,7 +25,6 @@ public class MafiaGame {
     public static final int MAX_PLAYERS = 8;
 
     private final String roomId;
-    private final transient ReentrantLock lock = new ReentrantLock();
     private final transient TopicService.Bag topicBag;
 
     /** nickname -> player, in join order (host succession order). */

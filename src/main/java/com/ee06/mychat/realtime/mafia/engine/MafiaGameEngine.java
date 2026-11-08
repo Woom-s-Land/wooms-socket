@@ -28,7 +28,7 @@ import static com.ee06.mychat.realtime.mafia.entity.GamePhase.*;
 /**
  * Server-authoritative Drawing-Mafia engine: roster, role assignment, phase
  * state machine, timers and vote tally. Every public entry point and timer
- * callback runs under the per-game {@link MafiaGame#getLock() lock}; transitions
+ * callback runs on the room's {@code RoomQueue} (one game at a time); transitions
  * are guarded by the expected phase so "all submitted" and "timer fired" can
  * race safely (only the first wins, the rest are no-ops).
  *
@@ -69,147 +69,127 @@ public class MafiaGameEngine {
     public void join(String roomId, String sessionId, String userUuid, String nickname, Integer costume) {
         if (userUuid == null || userUuid.isBlank() || nickname == null || nickname.isBlank()) return;
         MafiaGame game = repository.getOrCreate(roomId);
-        game.getLock().lock();
-        try {
-            MafiaPlayer existing = game.getPlayers().get(nickname);
-            if (existing != null) {
-                if (!userUuid.equals(existing.getUserUuid())) {
-                    broadcaster.error(sessionId, "이미 사용 중인 닉네임이에요.");
-                    return;
-                }
-                existing.setSessionId(sessionId);
-                existing.setConnected(true);
-                if (existing.getRole() != null) broadcaster.role(existing, game); // reconnect mid-round
-            } else {
-                boolean alreadyJoined = game.getPlayers().values().stream()
-                        .anyMatch(player -> userUuid.equals(player.getUserUuid()));
-                if (alreadyJoined) {
-                    broadcaster.error(sessionId, "이미 이 방에 참가한 계정이에요.");
-                    return;
-                }
-                if (game.getPhase() == LOBBY && game.getPlayers().size() >= MafiaGame.MAX_PLAYERS) {
-                    broadcaster.error(sessionId, "방이 가득 찼어요 (최대 " + MafiaGame.MAX_PLAYERS + "명).");
-                    return;
-                }
-                MafiaPlayer p = new MafiaPlayer(nickname, userUuid, costume, sessionId);
-                game.getPlayers().put(nickname, p);
-                if (game.getHostNickname() == null) game.setHostNickname(nickname);
-                // joining mid-round => role stays null => spectator until next round
+        MafiaPlayer existing = game.getPlayers().get(nickname);
+        if (existing != null) {
+            if (!userUuid.equals(existing.getUserUuid())) {
+                broadcaster.error(sessionId, "이미 사용 중인 닉네임이에요.");
+                return;
             }
-            repository.bindSession(sessionId, roomId);
-            game.getScores().putIfAbsent(nickname, 0);
-            broadcaster.state(game);
-        } finally {
-            game.getLock().unlock();
+            existing.setSessionId(sessionId);
+            existing.setConnected(true);
+            if (existing.getRole() != null) broadcaster.role(existing, game); // reconnect mid-round
+        } else {
+            boolean alreadyJoined = game.getPlayers().values().stream()
+                    .anyMatch(player -> userUuid.equals(player.getUserUuid()));
+            if (alreadyJoined) {
+                broadcaster.error(sessionId, "이미 이 방에 참가한 계정이에요.");
+                return;
+            }
+            if (game.getPhase() == LOBBY && game.getPlayers().size() >= MafiaGame.MAX_PLAYERS) {
+                broadcaster.error(sessionId, "방이 가득 찼어요 (최대 " + MafiaGame.MAX_PLAYERS + "명).");
+                return;
+            }
+            MafiaPlayer p = new MafiaPlayer(nickname, userUuid, costume, sessionId);
+            game.getPlayers().put(nickname, p);
+            if (game.getHostNickname() == null) game.setHostNickname(nickname);
+            // joining mid-round => role stays null => spectator until next round
         }
+        repository.bindSession(sessionId, roomId);
+        game.getScores().putIfAbsent(nickname, 0);
+        broadcaster.state(game);
     }
 
     public void start(String roomId, String sessionId, Integer drawSecondsOverride) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            MafiaPlayer requester = findBySession(game, sessionId);
-            if (requester == null) { broadcaster.error(sessionId, "게임에 먼저 참여해 주세요."); return; }
-            if (!requester.getNickname().equals(game.getHostNickname())) {
-                broadcaster.error(sessionId, "방장만 시작할 수 있어요."); return;
-            }
-            if (game.getPhase() != LOBBY && game.getPhase() != RESULT) {
-                broadcaster.error(sessionId, "이미 게임이 진행 중이에요."); return;
-            }
-
-            game.getPlayers().values().removeIf(p -> !p.isConnected()); // clean roster
-            List<MafiaPlayer> participants = new ArrayList<>(game.getPlayers().values());
-            if (participants.size() < MafiaGame.MIN_PLAYERS) {
-                broadcaster.error(sessionId, "최소 " + MafiaGame.MIN_PLAYERS + "명이 필요해요."); return;
-            }
-            if (participants.size() > MafiaGame.MAX_PLAYERS) {
-                broadcaster.error(sessionId, "최대 " + MafiaGame.MAX_PLAYERS + "명까지 가능해요."); return;
-            }
-
-            // reset round state
-            game.setRound(game.getRound() + 1);
-            game.getVotes().clear();
-            game.setOutcome(null);
-            game.setAccusedNickname(null);
-            game.setTie(false);
-            participants.forEach(MafiaPlayer::resetForNewRound);
-
-            // topic + mafia
-            TopicPair pair = topicService.pick(game.getTopicBag());
-            game.setTopicPair(pair);
-            game.setDrawSeconds(clampDrawSeconds(drawSecondsOverride));
-            MafiaPlayer mafia = participants.get(random.nextInt(participants.size()));
-            game.setMafiaNickname(mafia.getNickname());
-            for (MafiaPlayer p : participants) {
-                if (p == mafia) { p.setRole(PlayerRole.MAFIA); p.setWord(pair.decoy()); }
-                else { p.setRole(PlayerRole.CITIZEN); p.setWord(pair.topic()); }
-            }
-
-            // ASSIGN: send secret roles privately, then auto-advance to DRAW
-            game.setPhase(ASSIGN);
-            arm(game, timings.getAssignSeconds(), () -> enterDraw(roomId));
-            participants.forEach(p -> broadcaster.role(p, game));
-            broadcaster.state(game);
-            log.info("[sketchmafia] room {} started round {} ({} players)", roomId, game.getRound(), participants.size());
-        } finally {
-            game.getLock().unlock();
+        MafiaPlayer requester = findBySession(game, sessionId);
+        if (requester == null) { broadcaster.error(sessionId, "게임에 먼저 참여해 주세요."); return; }
+        if (!requester.getNickname().equals(game.getHostNickname())) {
+            broadcaster.error(sessionId, "방장만 시작할 수 있어요."); return;
         }
+        if (game.getPhase() != LOBBY && game.getPhase() != RESULT) {
+            broadcaster.error(sessionId, "이미 게임이 진행 중이에요."); return;
+        }
+
+        game.getPlayers().values().removeIf(p -> !p.isConnected()); // clean roster
+        List<MafiaPlayer> participants = new ArrayList<>(game.getPlayers().values());
+        if (participants.size() < MafiaGame.MIN_PLAYERS) {
+            broadcaster.error(sessionId, "최소 " + MafiaGame.MIN_PLAYERS + "명이 필요해요."); return;
+        }
+        if (participants.size() > MafiaGame.MAX_PLAYERS) {
+            broadcaster.error(sessionId, "최대 " + MafiaGame.MAX_PLAYERS + "명까지 가능해요."); return;
+        }
+
+        // reset round state
+        game.setRound(game.getRound() + 1);
+        game.getVotes().clear();
+        game.setOutcome(null);
+        game.setAccusedNickname(null);
+        game.setTie(false);
+        participants.forEach(MafiaPlayer::resetForNewRound);
+
+        // topic + mafia
+        TopicPair pair = topicService.pick(game.getTopicBag());
+        game.setTopicPair(pair);
+        game.setDrawSeconds(clampDrawSeconds(drawSecondsOverride));
+        MafiaPlayer mafia = participants.get(random.nextInt(participants.size()));
+        game.setMafiaNickname(mafia.getNickname());
+        for (MafiaPlayer p : participants) {
+            if (p == mafia) { p.setRole(PlayerRole.MAFIA); p.setWord(pair.decoy()); }
+            else { p.setRole(PlayerRole.CITIZEN); p.setWord(pair.topic()); }
+        }
+
+        // ASSIGN: send secret roles privately, then auto-advance to DRAW
+        game.setPhase(ASSIGN);
+        arm(game, timings.getAssignSeconds(), () -> enterDraw(roomId));
+        participants.forEach(p -> broadcaster.role(p, game));
+        broadcaster.state(game);
+        log.info("[sketchmafia] room {} started round {} ({} players)", roomId, game.getRound(), participants.size());
     }
 
     public void submit(String roomId, String sessionId, int[][] pixels) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != DRAW) return;
-            MafiaPlayer p = findBySession(game, sessionId);
-            if (p == null || p.getRole() == null) return; // not a participant
-            p.setGrid(normalizeGrid(pixels));
-            p.setSubmitted(true);
-            broadcaster.state(game);
-            if (allParticipantsSubmitted(game)) enterReveal(roomId);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != DRAW) return;
+        MafiaPlayer p = findBySession(game, sessionId);
+        if (p == null || p.getRole() == null) return; // not a participant
+        p.setGrid(normalizeGrid(pixels));
+        p.setSubmitted(true);
+        broadcaster.state(game);
+        if (allParticipantsSubmitted(game)) enterReveal(roomId);
     }
 
     public void vote(String roomId, String sessionId, String target) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != VOTE) return;
-            MafiaPlayer voter = findBySession(game, sessionId);
-            if (voter == null || voter.getRole() == null || !voter.isConnected()) return;
-            if (voter.getVotedFor() != null) return; // no double vote
-            MafiaPlayer t = target == null ? null : game.getPlayers().get(target);
-            if (t == null || t.getRole() == null || !t.isConnected()) {
-                broadcaster.error(sessionId, "투표 대상이 올바르지 않아요."); return;
-            }
-            if (t == voter) { broadcaster.error(sessionId, "자신에게는 투표할 수 없어요."); return; }
-            voter.setVotedFor(target);
-            game.getVotes().put(voter.getNickname(), target);
-            broadcaster.state(game);
-            if (allParticipantsVoted(game)) enterResult(roomId);
-        } finally {
-            game.getLock().unlock();
+        if (game.getPhase() != VOTE) return;
+        MafiaPlayer voter = findBySession(game, sessionId);
+        if (voter == null || voter.getRole() == null || !voter.isConnected()) return;
+        if (voter.getVotedFor() != null) return; // no double vote
+        MafiaPlayer t = target == null ? null : game.getPlayers().get(target);
+        if (t == null || t.getRole() == null || !t.isConnected()) {
+            broadcaster.error(sessionId, "투표 대상이 올바르지 않아요."); return;
         }
+        if (t == voter) { broadcaster.error(sessionId, "자신에게는 투표할 수 없어요."); return; }
+        voter.setVotedFor(target);
+        game.getVotes().put(voter.getNickname(), target);
+        broadcaster.state(game);
+        if (allParticipantsVoted(game)) enterResult(roomId);
     }
 
     public void chat(String roomId, String sessionId, String message) {
         if (message == null || message.isBlank()) return;
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != DISCUSS) return; // chat gated to discussion
-            MafiaPlayer p = findBySession(game, sessionId);
-            if (p == null) return;
-            broadcaster.chat(game, p.getNickname(), message.length() > 200 ? message.substring(0, 200) : message);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != DISCUSS) return; // chat gated to discussion
+        MafiaPlayer p = findBySession(game, sessionId);
+        if (p == null) return;
+        broadcaster.chat(game, p.getNickname(), message.length() > 200 ? message.substring(0, 200) : message);
+    }
+
+    /** The mafia room this connection successfully joined, or null. */
+    public String roomOf(String sessionId) {
+        return repository.roomOfSession(sessionId);
     }
 
     public void disconnect(String sessionId) {
@@ -218,43 +198,38 @@ public class MafiaGameEngine {
         if (roomId == null) return;
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            MafiaPlayer p = findBySession(game, sessionId);
-            if (p == null) return;
-            p.setConnected(false);
-            boolean wasHost = p.getNickname().equals(game.getHostNickname());
-            GamePhase ph = game.getPhase();
+        MafiaPlayer p = findBySession(game, sessionId);
+        if (p == null) return;
+        p.setConnected(false);
+        boolean wasHost = p.getNickname().equals(game.getHostNickname());
+        GamePhase ph = game.getPhase();
 
-            if (ph == LOBBY || ph == RESULT) {
-                game.getPlayers().remove(p.getNickname());
-                if (wasHost) reassignHost(game);
-                if (game.getPlayers().isEmpty()) { cancelTimer(game); repository.remove(roomId); return; }
-                broadcaster.state(game);
-                return;
-            }
-
-            // active round
-            if (p.isMafia()) {
-                if (ph == MAFIA_GUESS) {
-                    finalize(game, GameOutcome.CITIZEN_WIN); // already-caught mafia bailed → citizens win
-                } else {
-                    abortToLobby(game, "마피아가 나가 게임이 중단됐어요.");
-                }
-                return;
-            }
+        if (ph == LOBBY || ph == RESULT) {
+            game.getPlayers().remove(p.getNickname());
             if (wasHost) reassignHost(game);
-            if (participants(game).size() < MafiaGame.MIN_PLAYERS) {
-                abortToLobby(game, "인원이 부족해 게임이 중단됐어요.");
-            } else if (ph == DRAW && allParticipantsSubmitted(game)) {
-                enterReveal(roomId);
-            } else if (ph == VOTE && allParticipantsVoted(game)) {
-                enterResult(roomId);
+            if (game.getPlayers().isEmpty()) { cancelTimer(game); repository.remove(roomId); return; }
+            broadcaster.state(game);
+            return;
+        }
+
+        // active round
+        if (p.isMafia()) {
+            if (ph == MAFIA_GUESS) {
+                finalize(game, GameOutcome.CITIZEN_WIN); // already-caught mafia bailed → citizens win
             } else {
-                broadcaster.state(game);
+                abortToLobby(game, "마피아가 나가 게임이 중단됐어요.");
             }
-        } finally {
-            game.getLock().unlock();
+            return;
+        }
+        if (wasHost) reassignHost(game);
+        if (participants(game).size() < MafiaGame.MIN_PLAYERS) {
+            abortToLobby(game, "인원이 부족해 게임이 중단됐어요.");
+        } else if (ph == DRAW && allParticipantsSubmitted(game)) {
+            enterReveal(roomId);
+        } else if (ph == VOTE && allParticipantsVoted(game)) {
+            enterResult(roomId);
+        } else {
+            broadcaster.state(game);
         }
     }
 
@@ -263,131 +238,96 @@ public class MafiaGameEngine {
     void enterDraw(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != ASSIGN) return;
-            game.setPhase(DRAW);
-            arm(game, game.getDrawSeconds(), () -> enterReveal(roomId));
-            broadcaster.state(game);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != ASSIGN) return;
+        game.setPhase(DRAW);
+        arm(game, game.getDrawSeconds(), () -> enterReveal(roomId));
+        broadcaster.state(game);
     }
 
     void enterReveal(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != DRAW) return;
-            for (MafiaPlayer p : game.getPlayers().values()) {
-                if (p.getRole() != null && p.getGrid() == null) p.setGrid(emptyGrid());
-            }
-            game.setPhase(REVEAL);
-            arm(game, timings.getRevealSeconds(), () -> enterDiscuss(roomId));
-            broadcaster.reveal(game);
-            broadcaster.state(game);
-        } finally {
-            game.getLock().unlock();
+        if (game.getPhase() != DRAW) return;
+        for (MafiaPlayer p : game.getPlayers().values()) {
+            if (p.getRole() != null && p.getGrid() == null) p.setGrid(emptyGrid());
         }
+        game.setPhase(REVEAL);
+        arm(game, timings.getRevealSeconds(), () -> enterDiscuss(roomId));
+        broadcaster.reveal(game);
+        broadcaster.state(game);
     }
 
     void enterDiscuss(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != REVEAL) return;
-            game.setPhase(DISCUSS);
-            arm(game, timings.getDiscussSeconds(), () -> enterVote(roomId));
-            broadcaster.state(game);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != REVEAL) return;
+        game.setPhase(DISCUSS);
+        arm(game, timings.getDiscussSeconds(), () -> enterVote(roomId));
+        broadcaster.state(game);
     }
 
     void enterVote(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != DISCUSS) return;
-            game.getVotes().clear();
-            participants(game).forEach(p -> p.setVotedFor(null));
-            game.setPhase(VOTE);
-            arm(game, timings.getVoteSeconds(), () -> enterResult(roomId));
-            broadcaster.state(game);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != DISCUSS) return;
+        game.getVotes().clear();
+        participants(game).forEach(p -> p.setVotedFor(null));
+        game.setPhase(VOTE);
+        arm(game, timings.getVoteSeconds(), () -> enterResult(roomId));
+        broadcaster.state(game);
     }
 
     void enterResult(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != VOTE) return;
-            cancelTimer(game);
+        if (game.getPhase() != VOTE) return;
+        cancelTimer(game);
 
-            // tally
-            Map<String, Long> counts = new java.util.LinkedHashMap<>();
-            for (String target : game.getVotes().values()) counts.merge(target, 1L, Long::sum);
-            String accused = null;
-            long top = -1;
-            boolean tie = false;
-            for (Map.Entry<String, Long> e : counts.entrySet()) {
-                if (e.getValue() > top) { top = e.getValue(); accused = e.getKey(); tie = false; }
-                else if (e.getValue() == top) { tie = true; }
-            }
-            if (counts.isEmpty()) { accused = null; tie = true; }
+        // tally
+        Map<String, Long> counts = new java.util.LinkedHashMap<>();
+        for (String target : game.getVotes().values()) counts.merge(target, 1L, Long::sum);
+        String accused = null;
+        long top = -1;
+        boolean tie = false;
+        for (Map.Entry<String, Long> e : counts.entrySet()) {
+            if (e.getValue() > top) { top = e.getValue(); accused = e.getKey(); tie = false; }
+            else if (e.getValue() == top) { tie = true; }
+        }
+        if (counts.isEmpty()) { accused = null; tie = true; }
 
-            game.setAccusedNickname(tie ? null : accused);
-            game.setTie(tie);
-            boolean caught = !tie && accused != null && accused.equals(game.getMafiaNickname());
+        game.setAccusedNickname(tie ? null : accused);
+        game.setTie(tie);
+        boolean caught = !tie && accused != null && accused.equals(game.getMafiaNickname());
 
-            if (caught) {
-                // Fake-Artist twist: the caught mafia gets one chance to guess the topic.
-                game.setPhase(MAFIA_GUESS);
-                arm(game, timings.getGuessSeconds(), () -> guessTimeout(roomId));
-                broadcaster.state(game);
-            } else {
-                finalize(game, GameOutcome.MAFIA_WIN);
-            }
-        } finally {
-            game.getLock().unlock();
+        if (caught) {
+            // Fake-Artist twist: the caught mafia gets one chance to guess the topic.
+            game.setPhase(MAFIA_GUESS);
+            arm(game, timings.getGuessSeconds(), () -> guessTimeout(roomId));
+            broadcaster.state(game);
+        } else {
+            finalize(game, GameOutcome.MAFIA_WIN);
         }
     }
 
     public void guess(String roomId, String sessionId, String word) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != MAFIA_GUESS) return;
-            MafiaPlayer p = findBySession(game, sessionId);
-            if (p == null || !p.isMafia()) return; // only the caught mafia may guess
-            boolean correct = game.getTopicPair() != null
-                    && normalize(word).equals(normalize(game.getTopicPair().topic()));
-            finalize(game, correct ? GameOutcome.MAFIA_STEAL_WIN : GameOutcome.CITIZEN_WIN);
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != MAFIA_GUESS) return;
+        MafiaPlayer p = findBySession(game, sessionId);
+        if (p == null || !p.isMafia()) return; // only the caught mafia may guess
+        boolean correct = game.getTopicPair() != null
+                && normalize(word).equals(normalize(game.getTopicPair().topic()));
+        finalize(game, correct ? GameOutcome.MAFIA_STEAL_WIN : GameOutcome.CITIZEN_WIN);
     }
 
     void guessTimeout(String roomId) {
         MafiaGame game = repository.get(roomId);
         if (game == null) return;
-        game.getLock().lock();
-        try {
-            if (game.getPhase() != MAFIA_GUESS) return;
-            finalize(game, GameOutcome.CITIZEN_WIN); // mafia didn't guess in time
-        } finally {
-            game.getLock().unlock();
-        }
+        if (game.getPhase() != MAFIA_GUESS) return;
+        finalize(game, GameOutcome.CITIZEN_WIN); // mafia didn't guess in time
     }
 
-    /** Finalize to RESULT. Assumes the game lock is held. */
+    /** Finalize to RESULT. Runs on the room's queue. */
     private void finalize(MafiaGame game, GameOutcome outcome) {
         cancelTimer(game);
         game.setOutcome(outcome);

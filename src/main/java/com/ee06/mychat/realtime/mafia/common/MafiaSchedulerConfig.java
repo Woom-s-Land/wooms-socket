@@ -5,9 +5,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 /**
- * Dedicated scheduler for mafia phase timers, kept separate from the STOMP
- * heartbeat scheduler (wsTaskScheduler) so game timers can never starve
- * heartbeat delivery (or vice versa).
+ * Scheduler for mafia phase timers. A timer only re-enqueues its callback on
+ * the room's RoomQueue; game state is never touched on this thread.
  */
 @Configuration
 public class MafiaSchedulerConfig {

@@ -62,11 +62,10 @@ public class SketchService {
 
     private CompletionStage<Wall> load(String roomId, String cookie) {
         Wall existing = walls.get(roomId);
-        if (existing != null && existing.pixels != null) { synchronized (existing) { existing.cookie = cookie; } return CompletableFuture.completedFuture(existing); }
+        if (existing != null && existing.pixels != null) return CompletableFuture.completedFuture(existing);
         Wall wall = walls.computeIfAbsent(roomId, ignored -> new Wall());
         synchronized (wall) {
             if (wall.load != null) return wall.load;
-            wall.cookie = cookie;
             wall.load = bridge.wall(roomId, cookie).thenApply(json -> {
                 int[][] pixels = parseGrid(json == null ? null : json.get("pixels"));
                 synchronized (wall) { wall.pixels = pixels; }
@@ -113,7 +112,7 @@ public class SketchService {
         return request.thenAccept(ignored -> {
             // The request was admitted before revocation. Finish a successful archive
             // consistently even if its initiating connection has since been closed.
-            synchronized (wall) { wall.pixels = blank(); wall.dirty = false; wall.cookie = cookie; }
+            synchronized (wall) { wall.pixels = blank(); wall.dirty = false; }
             bus.publish("/ws/wooms/sketch/draw/" + identity.roomId(), Map.of("tool", "RESET"));
         });
     }
@@ -122,12 +121,12 @@ public class SketchService {
         walls.forEach((roomId, wall) -> {
             if (!wall.flushQueued.compareAndSet(false, true)) return;
             roomQueue.run(roomId, () -> {
-                final String cookie; final int[][] pixels;
+                final int[][] pixels;
                 synchronized (wall) {
                     if (!wall.dirty || wall.pixels == null) return CompletableFuture.completedFuture(null);
-                    cookie = wall.cookie; pixels = copy(wall.pixels);
+                    pixels = copy(wall.pixels);
                 }
-                return bridge.putWall(roomId, cookie, pixels).thenRun(() -> {
+                return bridge.putWall(roomId, pixels).thenRun(() -> {
                     synchronized (wall) { wall.dirty = false; }
                 });
             }).whenComplete((ignored, error) -> {
@@ -144,12 +143,12 @@ public class SketchService {
         CompletableFuture<?>[] futures = walls.entrySet().stream().map(entry -> {
             String roomId = entry.getKey(); Wall wall = entry.getValue();
             return roomQueue.run(roomId, () -> {
-                final String cookie; final int[][] pixels;
+                final int[][] pixels;
                 synchronized (wall) {
                     if (!wall.dirty || wall.pixels == null) return CompletableFuture.completedFuture(null);
-                    cookie = wall.cookie; pixels = copy(wall.pixels);
+                    pixels = copy(wall.pixels);
                 }
-                return bridge.putWall(roomId, cookie, pixels).thenRun(() -> {
+                return bridge.putWall(roomId, pixels).thenRun(() -> {
                     synchronized (wall) { wall.dirty = false; }
                 });
             }).whenComplete((ignored, error) -> { if (error != null) log.warn("Sketch wall shutdown flush failed for room {}", roomId); });
@@ -184,7 +183,6 @@ public class SketchService {
     private static final class Wall {
         private int[][] pixels;
         private boolean dirty;
-        private String cookie;
         private CompletableFuture<Wall> load;
         private final AtomicBoolean flushQueued = new AtomicBoolean();
     }
